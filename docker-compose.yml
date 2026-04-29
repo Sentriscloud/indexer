@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentrix-indexer-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: indexer
+      POSTGRES_PASSWORD: indexer
+      POSTGRES_DB: sentrix_indexer
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - ./.docker/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U indexer -d sentrix_indexer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: sentrix-indexer-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - ./.docker/redis:/data
+
+  indexer:
+    build:
+      context: .
+      dockerfile: apps/indexer/Dockerfile
+    container_name: sentrix-indexer-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INDEXER_DATABASE_URL: postgres://indexer:indexer@postgres:5432/sentrix_indexer
+      INDEXER_NETWORK: ${INDEXER_NETWORK:-mainnet}
+      INDEXER_HEALTH_PORT: 8082
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:8082:8082"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: sentrix-indexer-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INDEXER_DATABASE_URL: postgres://indexer:indexer@postgres:5432/sentrix_indexer
+      INDEXER_NETWORK: ${INDEXER_NETWORK:-mainnet}
+      API_PORT: 8081
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:8081:8081"
