@@ -21,10 +21,7 @@ const NETWORK = (process.env.INDEXER_NETWORK ?? "mainnet") as
 
 async function main() {
   const app = Fastify({
-    logger: {
-      level: process.env.LOG_LEVEL ?? "info",
-      transport: process.env.NODE_ENV === "production" ? undefined : { target: "pino-pretty" },
-    },
+    logger: { level: process.env.LOG_LEVEL ?? "info" },
   });
 
   await app.register(cors, { origin: true });

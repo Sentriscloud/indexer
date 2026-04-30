@@ -33,8 +33,8 @@ export const blocks = pgTable(
     parentHash: varchar("parent_hash", { length: 66 }).notNull(),
     timestamp: bigint("timestamp", { mode: "bigint" }).notNull(),
     validator: varchar("validator", { length: 42 }).notNull(),
-    gasUsed: bigint("gas_used", { mode: "bigint" }).notNull().default(0n),
-    gasLimit: bigint("gas_limit", { mode: "bigint" }).notNull().default(0n),
+    gasUsed: bigint("gas_used", { mode: "bigint" }).notNull().default(sql`0`),
+    gasLimit: bigint("gas_limit", { mode: "bigint" }).notNull().default(sql`0`),
     baseFee: numeric("base_fee", { precision: 78, scale: 0 }),
     txCount: integer("tx_count").notNull().default(0),
     stateRoot: varchar("state_root", { length: 66 }),
@@ -60,11 +60,11 @@ export const transactions = pgTable(
     fromAddr: varchar("from_addr", { length: 42 }).notNull(),
     toAddr: varchar("to_addr", { length: 42 }),
     value: numeric("value", { precision: 78, scale: 0 }).notNull().default("0"),
-    gasLimit: bigint("gas_limit", { mode: "bigint" }).notNull().default(0n),
-    gasUsed: bigint("gas_used", { mode: "bigint" }).default(0n),
+    gasLimit: bigint("gas_limit", { mode: "bigint" }).notNull().default(sql`0`),
+    gasUsed: bigint("gas_used", { mode: "bigint" }).default(sql`0`),
     gasPrice: numeric("gas_price", { precision: 78, scale: 0 }),
     fee: numeric("fee", { precision: 78, scale: 0 }).notNull().default("0"),
-    nonce: bigint("nonce", { mode: "bigint" }).notNull().default(0n),
+    nonce: bigint("nonce", { mode: "bigint" }).notNull().default(sql`0`),
     data: text("data"),
     status: smallint("status").notNull().default(1), // 1 = success, 0 = failed
     contractAddress: varchar("contract_address", { length: 42 }),
@@ -135,7 +135,7 @@ export const addresses = pgTable("addresses", {
   firstSeenBlock: bigint("first_seen_block", { mode: "bigint" }).notNull(),
   lastSeenBlock: bigint("last_seen_block", { mode: "bigint" }).notNull(),
   balanceCached: numeric("balance_cached", { precision: 78, scale: 0 }).default("0"),
-  nonce: bigint("nonce", { mode: "bigint" }).default(0n),
+  nonce: bigint("nonce", { mode: "bigint" }).default(sql`0`),
   isContract: boolean("is_contract").notNull().default(false),
   codeHash: varchar("code_hash", { length: 66 }),
 });
@@ -146,7 +146,7 @@ export const validators = pgTable("validators", {
   commissionBp: integer("commission_bp"),
   selfStake: numeric("self_stake", { precision: 78, scale: 0 }).default("0"),
   totalDelegated: numeric("total_delegated", { precision: 78, scale: 0 }).default("0"),
-  blocksProposed: bigint("blocks_proposed", { mode: "bigint" }).default(0n),
+  blocksProposed: bigint("blocks_proposed", { mode: "bigint" }).default(sql`0`),
   lastActiveBlock: bigint("last_active_block", { mode: "bigint" }),
   isJailed: boolean("is_jailed").notNull().default(false),
   jailUntil: bigint("jail_until", { mode: "bigint" }),
@@ -158,7 +158,7 @@ export const epochs = pgTable("epochs", {
   endHeight: bigint("end_height", { mode: "bigint" }).notNull(),
   validatorSet: jsonb("validator_set").$type<string[]>().notNull(),
   totalStaked: numeric("total_staked", { precision: 78, scale: 0 }).default("0"),
-  totalBlocksProduced: bigint("total_blocks_produced", { mode: "bigint" }).default(0n),
+  totalBlocksProduced: bigint("total_blocks_produced", { mode: "bigint" }).default(sql`0`),
 });
 
 // Indexer-internal state — last_synced_height, last_reorg_block, etc.
