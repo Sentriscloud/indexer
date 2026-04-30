@@ -17,6 +17,29 @@ import {
   type PublicClient,
 } from "viem";
 
+/// Wrap any RPC call in retry-with-backoff on HTTP 429 (rate limit).
+/// The validator's per-IP rate limit (SENTRIX_WRITE_RATE_LIMIT) is set
+/// low enough that a hot backfill loop trips it within seconds. Catching
+/// 429 + sleeping + retrying keeps the indexer alive without operator
+/// intervention on the validator side.
+async function retry429<T>(fn: () => Promise<T>, attempts = 6): Promise<T> {
+  let lastErr: unknown;
+  let delayMs = 500;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = String((err as Error)?.message ?? "");
+      if (!msg.includes("Status: 429") && !msg.includes("rate limit")) throw err;
+      // Exponential backoff: 0.5s → 1s → 2s → 4s → 8s → 16s.
+      await new Promise((r) => setTimeout(r, delayMs));
+      delayMs = Math.min(delayMs * 2, 16_000);
+    }
+  }
+  throw lastErr;
+}
+
 const SENTRIX_MAINNET = defineChain({
   id: 7119,
   name: "Sentrix",
@@ -53,10 +76,18 @@ export class SentrixClient {
 
   constructor(cfg: SentrixClientConfig) {
     const chain = cfg.network === "mainnet" ? SENTRIX_MAINNET : SENTRIX_TESTNET;
+    // Operator overrides via env, falling back to caller cfg, falling back
+    // to the public defaults. The wg1 / loopback path is what saves the
+    // backfill from the public RPC's per-IP rate limit — running on the
+    // build host we point at a validator's :8545/rpc directly.
     const httpUrl =
-      cfg.httpUrl ?? chain.rpcUrls.default.http[0];
+      process.env.INDEXER_RPC_HTTP_URL ??
+      cfg.httpUrl ??
+      chain.rpcUrls.default.http[0];
     const wsUrl =
-      cfg.wsUrl ?? chain.rpcUrls.default.webSocket?.[0];
+      process.env.INDEXER_RPC_WS_URL ??
+      cfg.wsUrl ??
+      chain.rpcUrls.default.webSocket?.[0];
 
     this.http = createPublicClient({ chain, transport: http(httpUrl) });
     this.ws = wsUrl
@@ -65,16 +96,18 @@ export class SentrixClient {
   }
 
   async getBlockNumber(): Promise<bigint> {
-    return this.http.getBlockNumber();
+    return retry429(() => this.http.getBlockNumber());
   }
 
   /** Full block w/ all transactions. */
   async getBlock(height: bigint): Promise<Block<bigint, true>> {
-    return this.http.getBlock({ blockNumber: height, includeTransactions: true });
+    return retry429(() =>
+      this.http.getBlock({ blockNumber: height, includeTransactions: true }),
+    );
   }
 
   async getLogsRange(fromBlock: bigint, toBlock: bigint): Promise<GetLogsReturnType> {
-    return this.http.getLogs({ fromBlock, toBlock });
+    return retry429(() => this.http.getLogs({ fromBlock, toBlock }));
   }
 
   /**

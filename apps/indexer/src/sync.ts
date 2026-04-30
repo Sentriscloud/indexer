@@ -45,8 +45,10 @@ export async function syncOnce(args: SyncOnceArgs): Promise<bigint> {
   const start = lastSynced + 1n;
   if (start > target) return lastSynced;
 
-  // Cap each pass to keep memory + transaction size bounded.
-  const BATCH = 50n;
+  // Cap each pass to keep memory + transaction size bounded. Operator
+  // can bump via env when running against a wg1 / loopback RPC that
+  // doesn't enforce the public rate limit.
+  const BATCH = BigInt(process.env.INDEXER_BATCH_SIZE ?? 50);
   const end = start + BATCH > target ? target : start + BATCH - 1n;
 
   log.info({ from: start.toString(), to: end.toString() }, "backfill batch");
