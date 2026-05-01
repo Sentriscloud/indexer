@@ -5,8 +5,7 @@ and log from the public RPC + WebSocket endpoints, decodes ERC-20/721/1155 trans
 tracks reorgs, and exposes the result as an Etherscan-API-compatible REST surface
 plus Sentrix-native endpoints (validators, epochs, native token ops).
 
-> **Status:** scaffold — Phase 1 in progress.
-> Tier 1 in `founder-private/ECOSYSTEM_DUAL_STACK_AUDIT_2026-04-28.md`.
+> **Status:** scaffold — Phase 1 in progress. Tier 1 of the Sentrix Builder Readiness Sprint.
 
 ## Architecture
 
