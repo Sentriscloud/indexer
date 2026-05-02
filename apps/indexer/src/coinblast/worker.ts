@@ -75,11 +75,20 @@ export async function runCoinblastWorker(args: WorkerArgs) {
 
   // Hydrate known curves from cb_tokens. After backfill catches up this is
   // the source of truth for which addresses to filter on. New curves get
-  // appended to this set as we process CurveCreated events.
+  // appended to this set either as we process CurveCreated events, or
+  // when pass-2's global topic-scan adopts a direct-deployed orphan.
   const knownCurves = new Set<string>();
   const existing = await db.select({ a: cbTokens.curveAddress }).from(cbTokens);
   for (const row of existing) knownCurves.add(row.a.toLowerCase());
   log.info({ count: knownCurves.size }, "coinblast: hydrated known curves");
+
+  // Memo of addresses that emitted a Buy/Sell/Graduated topic but failed
+  // the on-chain CoinBlastCurve probe — saves us from re-validating them
+  // on every chunk pass. Bounded by the number of unrelated contracts
+  // chain-wide that happen to use the same event signatures, which in
+  // practice is small; clearing the set on a long-running worker isn't
+  // worth the bookkeeping.
+  const knownNonCurves = new Set<string>();
 
   let cursor = await readCursor(db, network);
   log.info({ cursor: cursor.toString() }, "coinblast: starting backfill");
@@ -101,7 +110,16 @@ export async function runCoinblastWorker(args: WorkerArgs) {
     const to = from + CHUNK - 1n > target ? target : from + CHUNK - 1n;
 
     try {
-      await runChunk({ db, chain, log, factory, knownCurves, from, to });
+      await runChunk({
+        db,
+        chain,
+        log,
+        factory,
+        knownCurves,
+        knownNonCurves,
+        from,
+        to,
+      });
       cursor = to;
       await writeCursor(db, cursor);
       log.info(
@@ -129,12 +147,14 @@ interface ChunkArgs {
   log: Logger;
   factory: `0x${string}`;
   knownCurves: Set<string>;
+  knownNonCurves: Set<string>;
   from: bigint;
   to: bigint;
 }
 
 async function runChunk(args: ChunkArgs) {
-  const { db, chain, log, factory, knownCurves, from, to } = args;
+  const { db, chain, log, factory, knownCurves, knownNonCurves, from, to } =
+    args;
 
   // Pass 1: factory CurveCreated logs in [from, to]. Scoping by address
   // here avoids any topic0 collision with unrelated contracts that happen
@@ -154,37 +174,180 @@ async function runChunk(args: ChunkArgs) {
     if (l.address) knownCurves.add(l.address.toLowerCase());
   }
 
-  // Pass 2: curve-side Buy/Sell/Graduated. Filter to known curves only.
-  // viem accepts an address array. Empty set short-circuits — no curves yet,
-  // no point in calling getLogs.
-  if (knownCurves.size === 0) return;
+  // Pass 2: scan globally by event signature, no address filter. Picks up
+  // direct-deployed curves (CoinBlast Genesis was launched this way before
+  // the factory route shipped) — we lazy-create their cb_tokens rows on
+  // first sighting so future events are tracked normally. Topic0 collision
+  // defense: validate any unknown emitter is a real CoinBlastCurve via an
+  // on-chain `token()` read before we touch the DB; cache the result so we
+  // don't pay for the lookup more than once per address.
+  const curveLogs = await chain.http.getLogs({
+    fromBlock: from,
+    toBlock: to,
+    events: curveEvents,
+  });
 
-  const curveAddrs = Array.from(knownCurves) as `0x${string}`[];
+  for (const l of curveLogs) {
+    if (!l.address) continue;
+    const addr = l.address.toLowerCase();
 
-  // viem caps the address array length silently in some RPCs; chunk in
-  // batches of 100 to stay safe.
-  const BATCH = 100;
-  for (let i = 0; i < curveAddrs.length; i += BATCH) {
-    const batch = curveAddrs.slice(i, i + BATCH);
-    const curveLogs = await chain.http.getLogs({
-      address: batch,
-      fromBlock: from,
-      toBlock: to,
-      // Don't pass `event` — we want all three event types in one call.
-      // We dispatch by topic0 below.
-    });
-
-    for (const l of curveLogs) {
-      const t0 = l.topics[0];
-      if (t0 === TOPIC_BUY) await applyTrade(db, l, "buy");
-      else if (t0 === TOPIC_SELL) await applyTrade(db, l, "sell");
-      else if (t0 === TOPIC_GRADUATED) await applyGraduated(db, l);
-      // CurveCreated also has the curve as `topic1` indexed, but the LOG
-      // is emitted from the factory address — we already handled it in
-      // pass 1. Anything else is a topic we don't care about (no-op).
+    if (!knownCurves.has(addr)) {
+      if (knownNonCurves.has(addr)) continue; // collision, already vetted out
+      const isCurve = await tryAdoptOrphanCurve(db, chain, l, log);
+      if (!isCurve) {
+        knownNonCurves.add(addr);
+        continue;
+      }
+      knownCurves.add(addr);
     }
+
+    const t0 = l.topics[0];
+    if (t0 === TOPIC_BUY) await applyTrade(db, l, "buy");
+    else if (t0 === TOPIC_SELL) await applyTrade(db, l, "sell");
+    else if (t0 === TOPIC_GRADUATED) await applyGraduated(db, l);
   }
 }
+
+// Validate an unknown event emitter is a real CoinBlastCurve and, if so,
+// insert a cb_tokens row for it so the rest of the worker's pipeline can
+// process its events normally. Returns true on adopt, false if the
+// address turns out not to be one of ours (topic0 collision with an
+// unrelated contract).
+//
+// Owner is recorded as the zero address — we don't have CurveCreated to
+// pull it from, and chasing the contract-creation tx isn't worth the
+// extra RPC round-trip per orphan. Operators can backfill the owner
+// manually from the deploy tx if it ever matters for a UI surface.
+async function tryAdoptOrphanCurve(
+  db: DbClient,
+  chain: SentrixClient,
+  l: Log,
+  log: Logger,
+): Promise<boolean> {
+  if (!l.address || !l.blockNumber || !l.transactionHash) return false;
+  const addr = l.address.toLowerCase() as `0x${string}`;
+
+  // Probe the curve's view surface. A real CoinBlastCurve answers all
+  // three; an unrelated contract that happens to emit a same-shape Buy
+  // event won't, and the readContract call reverts. Run them in parallel
+  // and bail on the first reject.
+  let token: `0x${string}`;
+  let curveSupply: bigint;
+  let graduationThreshold: bigint;
+  try {
+    [token, curveSupply, graduationThreshold] = await Promise.all([
+      chain.http.readContract({
+        address: addr,
+        abi: CURVE_VIEWS_ABI,
+        functionName: "token",
+      }) as Promise<`0x${string}`>,
+      chain.http.readContract({
+        address: addr,
+        abi: CURVE_VIEWS_ABI,
+        functionName: "curveSupply",
+      }) as Promise<bigint>,
+      chain.http.readContract({
+        address: addr,
+        abi: CURVE_VIEWS_ABI,
+        functionName: "graduationSrxThreshold",
+      }) as Promise<bigint>,
+    ]);
+  } catch {
+    return false;
+  }
+
+  // Read name + symbol off the underlying token. These are decoration —
+  // if either fails (token contract is non-standard) we fall back to
+  // placeholders rather than refusing to adopt the curve, since the
+  // trade data is the part that matters.
+  const [name, symbol] = await Promise.all([
+    chain.http
+      .readContract({
+        address: token,
+        abi: ERC20_META_ABI,
+        functionName: "name",
+      })
+      .then((v) => v as string)
+      .catch(() => "Unknown"),
+    chain.http
+      .readContract({
+        address: token,
+        abi: ERC20_META_ABI,
+        functionName: "symbol",
+      })
+      .then((v) => v as string)
+      .catch(() => "???"),
+  ]);
+
+  await db
+    .insert(cbTokens)
+    .values({
+      curveAddress: addr,
+      tokenAddress: token.toLowerCase(),
+      ownerAddress: "0x0000000000000000000000000000000000000000",
+      name,
+      symbol,
+      curveSupply: curveSupply.toString(),
+      graduationThreshold: graduationThreshold.toString(),
+      isGraduated: false,
+      createdBlock: l.blockNumber,
+      createdTxHash: l.transactionHash,
+      totalVolumeSrx: "0",
+      tradeCount: 0,
+      lastPriceSrx: "0",
+    })
+    .onConflictDoNothing();
+
+  log.info(
+    { curve: addr, symbol, block: l.blockNumber.toString() },
+    "coinblast: adopted orphan curve (direct-deploy, no factory event)",
+  );
+  return true;
+}
+
+// Minimal ABIs for the orphan-adoption probe. Kept local so events.ts
+// stays focused on signatures the worker decodes; these are only used
+// for `readContract` calls.
+const CURVE_VIEWS_ABI = [
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "token",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "curveSupply",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "graduationSrxThreshold",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+] as const;
+
+const ERC20_META_ABI = [
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "name",
+    inputs: [],
+    outputs: [{ type: "string" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "symbol",
+    inputs: [],
+    outputs: [{ type: "string" }],
+  },
+] as const;
 
 // ── Event handlers ────────────────────────────────────────────────────────
 
