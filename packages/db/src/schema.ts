@@ -22,6 +22,7 @@ import {
   primaryKey,
   smallint,
   text,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -167,3 +168,90 @@ export const meta = pgTable("_meta", {
   value: text("value").notNull(),
   updatedAt: bigint("updated_at", { mode: "bigint" }).notNull(),
 });
+
+// ── CoinBlast launchpad ────────────────────────────────────────────────────
+//
+// Materialised view of CoinBlast — one row per curve in `cb_tokens`, one row
+// per Buy/Sell/Graduate event in `cb_trades`. Populated by a separate worker
+// (apps/indexer/src/coinblast/) that uses its own cursor (`_meta` key
+// `last_synced_coinblast_height`) and scans logs filtered by factory + curve
+// addresses. Independent of the chain-wide block-by-block sync — needed
+// because the chain-wide indexer is still backfilling from genesis while
+// the CoinBlast factory only deployed at block 1,178,667.
+//
+// `curve_address` is the natural primary key for cb_tokens (one curve per
+// launch, immutable, gas-derived → unique). No surrogate UUID — it would
+// double the row width without buying anything.
+
+export const cbTokens = pgTable(
+  "cb_tokens",
+  {
+    curveAddress: varchar("curve_address", { length: 42 }).primaryKey(),
+    tokenAddress: varchar("token_address", { length: 42 }).notNull().unique(),
+    ownerAddress: varchar("owner_address", { length: 42 }).notNull(),
+    name: text("name").notNull(),
+    symbol: text("symbol").notNull(),
+    curveSupply: numeric("curve_supply", { precision: 78, scale: 0 }).notNull(),
+    graduationThreshold: numeric("graduation_threshold", {
+      precision: 78,
+      scale: 0,
+    }).notNull(),
+    isGraduated: boolean("is_graduated").notNull().default(false),
+    // Block height of the CurveCreated event. Lets us order chronologically
+    // without joining `blocks` for the timestamp.
+    createdBlock: bigint("created_block", { mode: "bigint" }).notNull(),
+    createdTxHash: varchar("created_tx_hash", { length: 66 }).notNull(),
+    // Aggregated stats — updated in the same SQL transaction as the trade.
+    totalVolumeSrx: numeric("total_volume_srx", { precision: 78, scale: 0 })
+      .notNull()
+      .default("0"),
+    tradeCount: integer("trade_count").notNull().default(0),
+    // srx_per_token of the latest Buy/Sell trade. Useful for the launchpad
+    // grid — avoids a per-card subquery into cb_trades.
+    lastPriceSrx: numeric("last_price_srx", { precision: 78, scale: 0 })
+      .notNull()
+      .default("0"),
+  },
+  (t) => ({
+    ownerIdx: index("cb_tokens_owner_idx").on(t.ownerAddress),
+    graduatedIdx: index("cb_tokens_graduated_idx").on(t.isGraduated),
+    createdBlockIdx: index("cb_tokens_created_block_idx").on(t.createdBlock),
+  })
+);
+
+export const cbTrades = pgTable(
+  "cb_trades",
+  {
+    id: bigint("id", { mode: "bigint" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    curveAddress: varchar("curve_address", { length: 42 }).notNull(),
+    tokenAddress: varchar("token_address", { length: 42 }),
+    // "buy" | "sell" | "graduated". Graduated is one-shot per curve so we
+    // could split it off — keeping it here means the activity feed is one
+    // table instead of two.
+    type: varchar("type", { length: 12 }).notNull(),
+    traderAddress: varchar("trader_address", { length: 42 }).notNull(),
+    // For buy: srxIn (gross paid). For sell: srxOut (net received).
+    // For graduated: srxLiquidity (raised total).
+    srxAmount: numeric("srx_amount", { precision: 78, scale: 0 })
+      .notNull()
+      .default("0"),
+    // For buy: tokensOut. For sell: tokensIn. For graduated: tokenLiquidity.
+    tokenAmount: numeric("token_amount", { precision: 78, scale: 0 })
+      .notNull()
+      .default("0"),
+    // Buy/Sell only; 0 for graduated.
+    fee: numeric("fee", { precision: 78, scale: 0 }).notNull().default("0"),
+    blockNumber: bigint("block_number", { mode: "bigint" }).notNull(),
+    txHash: varchar("tx_hash", { length: 66 }).notNull(),
+    logIndex: integer("log_index").notNull(),
+  },
+  (t) => ({
+    // Idempotency key — re-running backfill must not double-write trades.
+    uniqLog: uniqueIndex("cb_trades_uniq_log").on(t.txHash, t.logIndex),
+    curveIdx: index("cb_trades_curve_idx").on(t.curveAddress),
+    traderIdx: index("cb_trades_trader_idx").on(t.traderAddress),
+    blockIdx: index("cb_trades_block_idx").on(t.blockNumber),
+  })
+);

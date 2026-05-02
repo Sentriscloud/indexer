@@ -17,6 +17,7 @@ import { SentrixClient } from "@sentriscloud/indexer-chain";
 import { eq, sql } from "drizzle-orm";
 
 import { syncOnce, indexBlock } from "./sync.js";
+import { runCoinblastWorker } from "./coinblast/worker.js";
 
 const log = pino({ name: "indexer", level: process.env.LOG_LEVEL ?? "info" });
 
@@ -36,23 +37,41 @@ async function main() {
   const app = Fastify({ logger: false });
   app.get("/health", async () => {
     const tip = await chain.getBlockNumber().catch(() => null);
-    const synced = await db
-      .select({ value: meta.value })
-      .from(meta)
-      .where(eq(meta.key, "last_synced_height"))
-      .limit(1)
-      .then((rows) => (rows[0]?.value ? BigInt(rows[0].value) : 0n));
+    const readMeta = async (key: string) =>
+      db
+        .select({ value: meta.value })
+        .from(meta)
+        .where(eq(meta.key, key))
+        .limit(1)
+        .then((rows) => (rows[0]?.value ? BigInt(rows[0].value) : 0n));
+    const synced = await readMeta("last_synced_height");
+    const cbSynced = await readMeta("last_synced_coinblast_height");
     const lag = tip !== null ? tip - synced : null;
+    const cbLag = tip !== null ? tip - cbSynced : null;
     return {
       status: tip !== null && lag !== null && lag < 50n ? "ok" : "lagging",
       network: NETWORK,
       tip: tip?.toString() ?? null,
       synced: synced.toString(),
       lag: lag?.toString() ?? null,
+      coinblast: {
+        synced: cbSynced.toString(),
+        lag: cbLag?.toString() ?? null,
+      },
     };
   });
   await app.listen({ host: "0.0.0.0", port: HEALTH_PORT });
   log.info({ port: HEALTH_PORT }, "health server listening");
+
+  // CoinBlast worker — kicked off BEFORE the chain-wide Phase 1 backfill so
+  // it runs in parallel. Without this, the chain-wide `while(true)` below
+  // would block until the genesis-up backfill catches up to tip-SAFE_LAG
+  // (~80 days at current 10 blocks/min), and the CoinBlast cursor would
+  // sit at 0 the whole time. Independent cursor + own retry path means a
+  // crash here doesn't tear down the chain-wide worker.
+  runCoinblastWorker({ db, chain, network: NETWORK, log }).catch((err) => {
+    log.error({ err: String(err) }, "coinblast worker exited unexpectedly");
+  });
 
   // Phase 1 — backfill.
   log.info("starting backfill phase");

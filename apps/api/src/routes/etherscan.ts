@@ -96,7 +96,7 @@ async function handleAccount(
 }
 
 async function handleStats(
-  ctx: { db: DbClient; chain: SentrixClient },
+  _ctx: { db: DbClient; chain: SentrixClient },
   q: EsQuery
 ) {
   switch (q.action) {
@@ -116,7 +116,7 @@ async function handleStats(
 }
 
 async function handleBlock(
-  ctx: { db: DbClient; chain: SentrixClient },
+  _ctx: { db: DbClient; chain: SentrixClient },
   q: EsQuery
 ) {
   switch (q.action) {
