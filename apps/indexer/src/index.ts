@@ -92,27 +92,49 @@ async function main() {
   }
   log.info("backfill caught up to tip - SAFE_LAG; entering tail phase");
 
-  // Phase 2 — tail (gRPC tip watcher).
-  // Single-flight gate: only one indexBlock at a time. If the tip advances
-  // by N during a slow indexBlock, we'll catch up sequentially on the next
-  // tick (the watcher only fires on advance, not on each interval).
+  // Phase 2 — tail (gRPC server-streaming push, v2.1.71+).
+  // Push architecture: server's EventBus.new_heads broadcast → gRPC
+  // BlockFinalized → this callback. No polling, no setInterval. On stream
+  // drop (process restart / network blip), the client reconnects with
+  // exponential backoff; on a Lagged sentinel (consumer 1024+ events
+  // behind), we trigger a JSON-RPC backfill catch-up rather than silently
+  // missing blocks.
   let inflight: Promise<void> | null = null;
-  const tipIntervalMs = Number(process.env.INDEXER_TIP_INTERVAL_MS ?? 200);
-
   const startTail = Date.now();
   let dashTicks = 0;
 
-  const watcher = chain.watchTipGrpc(
-    async (tipHeight, latencyMs) => {
-      // Dashboard line: [tip] [synced] [lag] [latency_ms] — one per advance.
+  const watcher = chain.streamBlocks(
+    async (ev) => {
+      if (ev.kind === "lagged") {
+        log.warn({ skipped: ev.skipped.toString() }, "stream lagged — resyncing via JSON-RPC backfill");
+        // Drain everything from synced+1 to the current tip via JSON-RPC.
+        // Single-flight gate also covers this path.
+        if (!inflight) {
+          inflight = (async () => {
+            try {
+              const tip = await chain.getBlockNumber();
+              const synced = await readMeta(db, "last_synced_height");
+              for (let h = synced + 1n; h <= tip; h++) {
+                await indexBlock({ db, chain, height: h, log });
+              }
+            } catch (err) {
+              log.error({ err: String(err) }, "lagged-resync failed");
+            } finally {
+              inflight = null;
+            }
+          })();
+        }
+        return;
+      }
+
       const synced = await readMeta(db, "last_synced_height");
-      const lag = tipHeight - synced;
+      const lag = ev.height - synced;
       log.info(
         {
-          tip: tipHeight.toString(),
+          tip: ev.height.toString(),
           synced: synced.toString(),
           lag: lag.toString(),
-          latency_ms: latencyMs,
+          latency_ms: ev.latencyMs,
           ticks: ++dashTicks,
           uptime_s: Math.floor((Date.now() - startTail) / 1000),
         },
@@ -120,12 +142,12 @@ async function main() {
       );
 
       // Index every block from synced+1 to the new tip. Single-flight so
-      // overlapping ticks don't double-write.
+      // overlapping pushes don't double-write.
       if (inflight) return;
       inflight = (async () => {
         try {
           let h = synced + 1n;
-          while (h <= tipHeight) {
+          while (h <= ev.height) {
             await indexBlock({ db, chain, height: h, log });
             h++;
           }
@@ -137,8 +159,8 @@ async function main() {
       })();
     },
     {
-      intervalMs: tipIntervalMs,
-      onError: (err) => log.warn({ err: String(err) }, "grpc tip watcher error (backing off)"),
+      onError: (err) => log.warn({ err: String(err) }, "grpc stream error (reconnecting)"),
+      onReconnect: (attempt) => log.info({ attempt }, "grpc stream reconnect"),
     },
   );
 

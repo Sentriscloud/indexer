@@ -116,6 +116,11 @@ export interface TipWatcher {
   stop: () => void;
 }
 
+/** Push-based block subscription (gRPC server-streaming, v2.1.71+). */
+export interface BlockStreamSub {
+  stop: () => void;
+}
+
 export class SentrixClient {
   readonly http: PublicClient;
   readonly ws: PublicClient;
@@ -195,6 +200,114 @@ export class SentrixClient {
    * `onError` callback (if provided) sees the error so it can be surfaced
    * in the dashboard log; otherwise we just log.warn it via `onError = null`.
    */
+  /**
+   * Push-based block subscription via gRPC server-streaming (v2.1.71+).
+   * Subscribes to `sentrix.v1.Sentrix/StreamEvents` and invokes `onBlock`
+   * once per `BlockFinalized` ChainEvent. The stream sits on the server's
+   * EventBus broadcast channel — same source the JSON-RPC `eth_subscribe`
+   * WebSocket handlers consume — so ordering / Lagged semantics match.
+   *
+   * Resilience: on stream end (network blip, server restart, broadcast
+   * Closed), re-subscribes with exponential backoff (500 ms → 8 s cap).
+   * No zombie processes; `stop()` cancels both the active call and any
+   * pending reconnect timer.
+   *
+   * On a `Lagged` sentinel from the server (consumer fell behind 1024+
+   * events), the callback fires with `kind: "lagged"` so the indexer can
+   * resync via JSON-RPC backfill instead of silently missing blocks.
+   */
+  streamBlocks(
+    onBlock: (
+      ev:
+        | { kind: "block"; height: bigint; hash: string; latencyMs: number }
+        | { kind: "lagged"; skipped: bigint },
+    ) => void,
+    opts: { onError?: (err: unknown) => void; onReconnect?: (attempt: number) => void } = {},
+  ): BlockStreamSub {
+    let stopped = false;
+    let backoffMs = 500;
+    let attempt = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let activeCall: any = null;
+    let pendingTimer: NodeJS.Timeout | null = null;
+
+    const subscribe = () => {
+      if (stopped) return;
+      attempt++;
+      if (attempt > 1 && opts.onReconnect) opts.onReconnect(attempt);
+      const tStart = Date.now();
+      // Empty StreamEventsRequest = subscribe to all events from "now"
+      // (server v0.3 always returns BlockFinalized + Lagged sentinels;
+      // filter / from_sequence are server-side ignored until v0.4).
+      activeCall = this.getGrpcStub().StreamEvents({});
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      activeCall.on("data", (msg: any) => {
+        // Reset backoff on first successful frame after a reconnect.
+        backoffMs = 500;
+        const latencyMs = Date.now() - tStart;
+        if (msg.block_finalized?.block) {
+          const b = msg.block_finalized.block;
+          onBlock({
+            kind: "block",
+            height: BigInt(b.index),
+            hash: Buffer.from(b.hash?.value ?? new Uint8Array()).toString("hex"),
+            latencyMs,
+          });
+        } else if (msg.lagged) {
+          onBlock({
+            kind: "lagged",
+            skipped: BigInt(msg.lagged.skipped_count ?? 0),
+          });
+        }
+      });
+
+      activeCall.on("error", (err: Error) => {
+        if (opts.onError) opts.onError(err);
+        scheduleReconnect();
+      });
+
+      activeCall.on("end", () => {
+        // Server closed (process restart, broadcast Closed) — reconnect.
+        scheduleReconnect();
+      });
+    };
+
+    const scheduleReconnect = () => {
+      if (stopped) return;
+      if (pendingTimer) return;
+      const delay = backoffMs;
+      backoffMs = Math.min(backoffMs * 2, 8000);
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        subscribe();
+      }, delay);
+    };
+
+    subscribe();
+
+    return {
+      stop: () => {
+        stopped = true;
+        if (pendingTimer) clearTimeout(pendingTimer);
+        if (activeCall) {
+          try {
+            activeCall.cancel();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (this.grpcStub) {
+          try {
+            this.grpcStub.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      },
+    };
+  }
+
   watchTipGrpc(
     onTip: (height: bigint, latencyMs: number) => void,
     opts: { intervalMs?: number; onError?: (err: unknown) => void } = {},
