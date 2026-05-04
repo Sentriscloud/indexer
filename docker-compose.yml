@@ -32,6 +32,7 @@ services:
       dockerfile: apps/indexer/Dockerfile
     container_name: sentrix-indexer-worker
     restart: unless-stopped
+    init: true
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,6 +50,7 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: sentrix-indexer-api
     restart: unless-stopped
+    init: true
     depends_on:
       postgres:
         condition: service_healthy

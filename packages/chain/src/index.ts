@@ -17,6 +17,30 @@ import {
   type PublicClient,
 } from "viem";
 
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+
+// Resolve the bundled .proto file relative to this source file. The Docker
+// image copies packages/chain/proto/sentrix.proto alongside the .ts source
+// (mirrored exactly from the chain repo's crates/sentrix-grpc/proto/), so
+// runtime path resolution works identically inside the container and during
+// `tsx watch` on the host.
+const PROTO_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../proto/sentrix.proto",
+);
+const protoPkgDef = protoLoader.loadSync(PROTO_PATH, {
+  keepCase: true,
+  longs: String,
+  enums: String,
+  defaults: true,
+  oneofs: true,
+});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const sentrixProto = grpc.loadPackageDefinition(protoPkgDef) as any;
+
 /// Wrap any RPC call in retry-with-backoff on HTTP 429 (rate limit).
 /// The validator's per-IP rate limit (SENTRIX_WRITE_RATE_LIMIT) is set
 /// low enough that a hot backfill loop trips it within seconds. Catching
@@ -68,11 +92,36 @@ export interface SentrixClientConfig {
   network: "mainnet" | "testnet";
   httpUrl?: string;
   wsUrl?: string;
+  /** gRPC endpoint (host:443). Defaults to grpc.sentrixchain.com / grpc-testnet. */
+  grpcUrl?: string;
+}
+
+interface GrpcBlockHeader {
+  index: bigint;
+  hash: string;
+}
+
+/**
+ * Tip watcher backed by the side-car gRPC `GetBlock {latest:true}`. Called
+ * once per `intervalMs`; emits the new tip height whenever it advances.
+ *
+ * Why polling instead of streaming: the chain side-car ships GetBlock +
+ * GetBalance in v0.2 — server-streaming `StreamEvents` returns Unimplemented
+ * until v0.3. Polling at ~200 ms is a clean intermediate: same throughput as
+ * the prior viem WS subscription with much less log noise (no 4 s viem
+ * fallback poll, no 429 retry stack), and switching to push later is a
+ * one-line method-name swap once StreamEvents is wired.
+ */
+export interface TipWatcher {
+  stop: () => void;
 }
 
 export class SentrixClient {
   readonly http: PublicClient;
   readonly ws: PublicClient;
+  readonly grpcUrl: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private grpcStub: any | null = null;
 
   constructor(cfg: SentrixClientConfig) {
     const chain = cfg.network === "mainnet" ? SENTRIX_MAINNET : SENTRIX_TESTNET;
@@ -93,6 +142,101 @@ export class SentrixClient {
     this.ws = wsUrl
       ? createPublicClient({ chain, transport: webSocket(wsUrl) })
       : this.http;
+
+    this.grpcUrl =
+      process.env.INDEXER_GRPC_URL ??
+      cfg.grpcUrl ??
+      (cfg.network === "mainnet"
+        ? "grpc.sentrixchain.com:443"
+        : "grpc-testnet.sentrixchain.com:443");
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private getGrpcStub(): any {
+    if (this.grpcStub) return this.grpcStub;
+    // SSL credentials by default (we always go through the public TLS edge).
+    // Set INDEXER_GRPC_INSECURE=1 only for local plaintext side-car testing.
+    const creds =
+      process.env.INDEXER_GRPC_INSECURE === "1"
+        ? grpc.credentials.createInsecure()
+        : grpc.credentials.createSsl();
+    this.grpcStub = new sentrixProto.sentrix.v1.Sentrix(this.grpcUrl, creds);
+    return this.grpcStub;
+  }
+
+  /**
+   * Fetch the latest block header via gRPC. Cheap (no tx body in v0.2).
+   * Used by the tip watcher to detect head advance with minimal payload.
+   */
+  async getLatestHeaderGrpc(): Promise<GrpcBlockHeader> {
+    return new Promise((resolve, reject) => {
+      this.getGrpcStub().GetBlock(
+        { latest: true },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (err: Error | null, resp: any) => {
+          if (err) return reject(err);
+          // proto-loader returns `index` as string when longs:String. Hash is
+          // { value: Buffer }.
+          const idx = BigInt(resp.index);
+          const hash = Buffer.from(resp.hash?.value ?? new Uint8Array()).toString("hex");
+          resolve({ index: idx, hash });
+        },
+      );
+    });
+  }
+
+  /**
+   * Poll-based tip watcher. Calls `onTip(height)` exactly once per height
+   * advance. Internally polls GetBlock at `intervalMs` (default 200 ms) and
+   * deduplicates against the last seen height.
+   *
+   * On gRPC errors, increments a per-instance retry delay (capped) and
+   * retries — no zombie processes, no unbounded log spam. The caller's
+   * `onError` callback (if provided) sees the error so it can be surfaced
+   * in the dashboard log; otherwise we just log.warn it via `onError = null`.
+   */
+  watchTipGrpc(
+    onTip: (height: bigint, latencyMs: number) => void,
+    opts: { intervalMs?: number; onError?: (err: unknown) => void } = {},
+  ): TipWatcher {
+    const intervalMs = opts.intervalMs ?? 200;
+    let stopped = false;
+    let lastHeight: bigint | null = null;
+    let backoffMs = intervalMs;
+
+    const tick = async () => {
+      if (stopped) return;
+      const t0 = Date.now();
+      try {
+        const head = await this.getLatestHeaderGrpc();
+        const latency = Date.now() - t0;
+        backoffMs = intervalMs;
+        if (lastHeight === null || head.index > lastHeight) {
+          lastHeight = head.index;
+          onTip(head.index, latency);
+        }
+      } catch (err) {
+        // Exponential backoff on stream/connection errors. Cap at 8 s so
+        // a flapping endpoint doesn't permanently silence the indexer.
+        backoffMs = Math.min(backoffMs * 2, 8000);
+        if (opts.onError) opts.onError(err);
+      }
+      if (!stopped) setTimeout(tick, backoffMs);
+    };
+    tick();
+
+    return {
+      stop: () => {
+        stopped = true;
+        if (this.grpcStub) {
+          try {
+            this.grpcStub.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      },
+    };
   }
 
   async getBlockNumber(): Promise<bigint> {

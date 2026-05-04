@@ -1,10 +1,12 @@
 // Indexer worker entry point. Two phases at startup:
 //   1. Backfill — pull history from `last_synced_height + 1` to `tip - SAFE_LAG`
-//      in batches. We stop short of the tip so we never race the BFT finalizer
-//      writing a block whose justification we'd partial-read.
-//   2. Tail — subscribe to newHeads, refetch each block by number, persist.
-//      Reorg detection: if `block.parentHash !== lastSeenBlock.hash`, walk
-//      back N blocks and re-sync.
+//      in batches via JSON-RPC eth_getBlockByNumber. gRPC GetBlock has a
+//      ~1000-block in-memory window so it's not usable for historical reads;
+//      JSON-RPC stays the canonical path for backfill.
+//   2. Tail — gRPC `GetBlock {latest:true}` polled at INDEXER_TIP_INTERVAL_MS
+//      (default 200 ms) detects new tips with sub-200 ms latency. We refetch
+//      the full block via JSON-RPC for tx + log bodies (gRPC v0.2 returns
+//      empty `transactions`; that lands in v0.3 alongside StreamEvents).
 //
 // A tiny Fastify health endpoint runs alongside so docker compose / Caddy
 // can probe the container.
@@ -20,6 +22,20 @@ import { syncOnce, indexBlock } from "./sync.js";
 import { runCoinblastWorker } from "./coinblast/worker.js";
 
 const log = pino({ name: "indexer", level: process.env.LOG_LEVEL ?? "info" });
+
+// Module-scope: also used by the gRPC tip watcher to compute lag without
+// re-implementing the same SELECT inline.
+async function readMeta(
+  db: ReturnType<typeof createDb>,
+  key: string,
+): Promise<bigint> {
+  const rows = await db
+    .select({ value: meta.value })
+    .from(meta)
+    .where(eq(meta.key, key))
+    .limit(1);
+  return rows[0]?.value ? BigInt(rows[0].value) : 0n;
+}
 
 const DB_URL =
   process.env.INDEXER_DATABASE_URL ??
@@ -37,15 +53,8 @@ async function main() {
   const app = Fastify({ logger: false });
   app.get("/health", async () => {
     const tip = await chain.getBlockNumber().catch(() => null);
-    const readMeta = async (key: string) =>
-      db
-        .select({ value: meta.value })
-        .from(meta)
-        .where(eq(meta.key, key))
-        .limit(1)
-        .then((rows) => (rows[0]?.value ? BigInt(rows[0].value) : 0n));
-    const synced = await readMeta("last_synced_height");
-    const cbSynced = await readMeta("last_synced_coinblast_height");
+    const synced = await readMeta(db, "last_synced_height");
+    const cbSynced = await readMeta(db, "last_synced_coinblast_height");
     const lag = tip !== null ? tip - synced : null;
     const cbLag = tip !== null ? tip - cbSynced : null;
     return {
@@ -83,18 +92,61 @@ async function main() {
   }
   log.info("backfill caught up to tip - SAFE_LAG; entering tail phase");
 
-  // Phase 2 — tail.
-  const unwatch = chain.watchBlocks((n) => {
-    indexBlock({ db, chain, height: n, log }).catch((err) => {
-      log.error({ err: String(err), height: n.toString() }, "tail indexBlock failed");
-    });
-  });
+  // Phase 2 — tail (gRPC tip watcher).
+  // Single-flight gate: only one indexBlock at a time. If the tip advances
+  // by N during a slow indexBlock, we'll catch up sequentially on the next
+  // tick (the watcher only fires on advance, not on each interval).
+  let inflight: Promise<void> | null = null;
+  const tipIntervalMs = Number(process.env.INDEXER_TIP_INTERVAL_MS ?? 200);
+
+  const startTail = Date.now();
+  let dashTicks = 0;
+
+  const watcher = chain.watchTipGrpc(
+    async (tipHeight, latencyMs) => {
+      // Dashboard line: [tip] [synced] [lag] [latency_ms] — one per advance.
+      const synced = await readMeta(db, "last_synced_height");
+      const lag = tipHeight - synced;
+      log.info(
+        {
+          tip: tipHeight.toString(),
+          synced: synced.toString(),
+          lag: lag.toString(),
+          latency_ms: latencyMs,
+          ticks: ++dashTicks,
+          uptime_s: Math.floor((Date.now() - startTail) / 1000),
+        },
+        "tip",
+      );
+
+      // Index every block from synced+1 to the new tip. Single-flight so
+      // overlapping ticks don't double-write.
+      if (inflight) return;
+      inflight = (async () => {
+        try {
+          let h = synced + 1n;
+          while (h <= tipHeight) {
+            await indexBlock({ db, chain, height: h, log });
+            h++;
+          }
+        } catch (err) {
+          log.error({ err: String(err) }, "tail indexBlock failed");
+        } finally {
+          inflight = null;
+        }
+      })();
+    },
+    {
+      intervalMs: tipIntervalMs,
+      onError: (err) => log.warn({ err: String(err) }, "grpc tip watcher error (backing off)"),
+    },
+  );
 
   // Graceful shutdown.
   const shutdown = async (sig: string) => {
     log.info({ sig }, "shutting down");
     try {
-      unwatch();
+      watcher.stop();
     } catch {
       /* ignore */
     }
