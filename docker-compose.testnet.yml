@@ -51,6 +51,12 @@ services:
       INDEXER_NETWORK: testnet
       INDEXER_HEALTH_PORT: 8084
       LOG_LEVEL: info
+      # Bumped from default 50 — testnet currently 2.5M blocks ahead of the
+      # backfill cursor; at 50/batch the catch-up ETA is ~70h. 500/batch
+      # tightens that to ~7h with no observed RPC pressure increase
+      # (each block fetch is independent and our retry429 wrapper handles
+      # transient 429/502s anyway).
+      INDEXER_BATCH_SIZE: "500"
     ports:
       - "127.0.0.1:8084:8084"
     # Override the Dockerfile's built-in healthcheck — the image bakes

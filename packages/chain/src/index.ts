@@ -433,6 +433,17 @@ export class SentrixClient {
   }
 
   /**
+   * Fetch deployed bytecode at an address. Returns "0x" when the address has
+   * no code (= EOA). Used by the contract-detect worker to flip the
+   * `addresses.is_contract` flag for addresses we've seen but haven't probed
+   * yet — the hot path in sync.ts skips this lookup to keep tx insertion fast.
+   */
+  async getCode(address: `0x${string}`): Promise<`0x${string}`> {
+    const code = await retry429(() => this.http.getBytecode({ address }));
+    return (code ?? "0x") as `0x${string}`;
+  }
+
+  /**
    * Subscribe to new heads. Each event delivers the next block's header —
    * the indexer should refetch the block by number to get full tx + log data.
    */
