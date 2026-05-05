@@ -89,25 +89,46 @@ export async function indexBlock(args: IndexBlockArgs) {
       })
       .onConflictDoNothing();
 
-    for (const t of block.transactions) {
-      if (typeof t === "string") continue; // we asked for full txs, but be defensive
+    // Native-shape adapter. eth_getBlockByNumber on Sentrix returns hash-
+    // only entries (chain doesn't honor includeTransactions=true), and
+    // eth_getTransactionByHash returns the native `{transaction: {…}}`
+    // wrapper instead of the EVM-spec shape viem expects. So we fetch
+    // each tx via the chain native REST, map the native fields into the
+    // indexer schema, and convert sentri → wei (1 sentri = 1e10 wei) so
+    // the value/fee columns share the same 18-decimal scale as the EVM
+    // rail. COINBASE sender sentinel maps to the all-zero address +
+    // tx_type='coinbase' so consumers can filter rewards out of any
+    // address-history query.
+    const ZERO = "0x0000000000000000000000000000000000000000" as const;
+    const SENTRI_TO_WEI = 10_000_000_000n;
+    for (let i = 0; i < block.transactions.length; i++) {
+      const entry = block.transactions[i];
+      const hash = typeof entry === "string" ? entry : entry.hash;
+      const native = await chain.getNativeTransaction(hash);
+      if (!native) continue; // 404 or fetch error — skip, will retry on resync
+      const inner = native.transaction;
+      const isCoinbase = inner.from_address === "COINBASE";
+      const fromAddr = isCoinbase ? ZERO : inner.from_address.toLowerCase();
+      const toAddr = inner.to_address ? inner.to_address.toLowerCase() : null;
+      const txHash = hash.startsWith("0x") ? hash.toLowerCase() : `0x${hash.toLowerCase()}`;
       await tx
         .insert(txsTable)
         .values({
-          hash: t.hash,
+          hash: txHash,
           blockHeight: height,
-          txIndex: t.transactionIndex ?? 0,
-          fromAddr: t.from,
-          toAddr: t.to ?? null,
-          value: t.value.toString(),
-          gasLimit: t.gas ?? 0n,
-          gasPrice: t.gasPrice?.toString() ?? null,
-          fee: 0n.toString(), // filled in later when we read receipts
-          nonce: BigInt(t.nonce),
-          data: t.input,
+          txIndex: i,
+          fromAddr,
+          toAddr,
+          value: (BigInt(inner.amount) * SENTRI_TO_WEI).toString(),
+          gasLimit: 0n,
+          gasUsed: 0n,
+          gasPrice: null,
+          fee: (BigInt(inner.fee) * SENTRI_TO_WEI).toString(),
+          nonce: BigInt(inner.nonce),
+          data: inner.data,
           status: 1,
           contractAddress: null,
-          txType: t.to == null ? "evm" : "evm",
+          txType: isCoinbase ? "coinbase" : "native",
         })
         .onConflictDoNothing();
     }
