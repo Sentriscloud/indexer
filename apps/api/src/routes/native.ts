@@ -6,6 +6,7 @@ import { and, asc, desc, eq, lte, or, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 
 import {
+  addresses,
   blocks,
   logs,
   tokenTransfers,
@@ -140,6 +141,159 @@ export function registerNativeRoutes(
     statsDailyCache = { at: Date.now(), data };
     return data;
   });
+
+  // ── /accounts/active ──────────────────────────────────────
+  // Most-active senders over all-time history (count tx by from_addr).
+  // Distinct path from chain native /accounts/top (which sorts by
+  // balance) so the Caddy edge can route this one to the indexer
+  // without colliding with the existing richlist endpoint.
+  app.get<{ Querystring: { limit?: string } }>(
+    "/accounts/active",
+    async (req) => {
+      const limit = clampLimit(req.query.limit);
+      const rows = await ctx.db.execute<{ address: string; tx_count: string }>(
+        sql`
+          SELECT from_addr AS address, count(*)::text AS tx_count
+          FROM ${transactions}
+          GROUP BY from_addr
+          ORDER BY count(*) DESC
+          LIMIT ${limit}
+        `
+      );
+      return {
+        accounts: (rows as unknown as Array<{ address: string; tx_count: string }>).map(
+          (r, i) => ({ rank: i + 1, address: r.address, tx_count: Number(r.tx_count) })
+        ),
+      };
+    }
+  );
+
+  // ── /contracts/stats ──────────────────────────────────────
+  // Sort modes: `calls` (count tx with to_addr = contract), `gas_used`
+  // (sum gas_used per contract). Reads `addresses.is_contract` to scope
+  // the join — the indexer marks an address contract on first-deploy
+  // detection (sync.ts).
+  app.get<{ Querystring: { limit?: string; sort?: "calls" | "gas_used" } }>(
+    "/contracts/stats",
+    async (req) => {
+      const limit = clampLimit(req.query.limit);
+      const sort = req.query.sort === "gas_used" ? "gas_used" : "calls";
+      if (sort === "gas_used") {
+        const rows = await ctx.db.execute<{ address: string; gas_used: string; calls: string }>(
+          sql`
+            SELECT t.to_addr AS address,
+                   COALESCE(sum(t.gas_used), 0)::text AS gas_used,
+                   count(*)::text AS calls
+            FROM ${transactions} t
+            JOIN ${addresses} a ON a.address = t.to_addr AND a.is_contract = true
+            WHERE t.to_addr IS NOT NULL
+            GROUP BY t.to_addr
+            ORDER BY sum(t.gas_used) DESC NULLS LAST
+            LIMIT ${limit}
+          `
+        );
+        return {
+          contracts: (rows as unknown as Array<{ address: string; gas_used: string; calls: string }>).map(
+            (r, i) => ({
+              rank: i + 1,
+              address: r.address,
+              gas_used: Number(r.gas_used),
+              calls: Number(r.calls),
+            })
+          ),
+        };
+      }
+      const rows = await ctx.db.execute<{ address: string; calls: string; gas_used: string }>(
+        sql`
+          SELECT t.to_addr AS address,
+                 count(*)::text AS calls,
+                 COALESCE(sum(t.gas_used), 0)::text AS gas_used
+          FROM ${transactions} t
+          JOIN ${addresses} a ON a.address = t.to_addr AND a.is_contract = true
+          WHERE t.to_addr IS NOT NULL
+          GROUP BY t.to_addr
+          ORDER BY count(*) DESC
+          LIMIT ${limit}
+        `
+      );
+      return {
+        contracts: (rows as unknown as Array<{ address: string; calls: string; gas_used: string }>).map(
+          (r, i) => ({
+            rank: i + 1,
+            address: r.address,
+            calls: Number(r.calls),
+            gas_used: Number(r.gas_used),
+          })
+        ),
+      };
+    }
+  );
+
+  // ── /whale/tx ─────────────────────────────────────────────
+  // Whale transfers: top tx by `value` (native SRX in wei via numeric).
+  // Used by scan leaderboard /whale/recent. Default threshold is the
+  // top-N by value across all transactions; ?threshold=X filters to
+  // tx with value >= X (in raw wei, 18-decimal). Scan side converts.
+  app.get<{ Querystring: { limit?: string; threshold?: string } }>(
+    "/whale/tx",
+    async (req) => {
+      const limit = clampLimit(req.query.limit);
+      const threshold = req.query.threshold;
+      const rows = threshold
+        ? await ctx.db.execute<{
+            hash: string;
+            from_addr: string;
+            to_addr: string | null;
+            value: string;
+            block_height: string;
+            timestamp: string;
+          }>(
+            sql`
+              SELECT t.hash, t.from_addr, t.to_addr, t.value::text,
+                     t.block_height::text, b.timestamp::text
+              FROM ${transactions} t
+              JOIN ${blocks} b ON b.height = t.block_height
+              WHERE t.value::numeric >= ${threshold}::numeric
+              ORDER BY t.value::numeric DESC, t.block_height DESC
+              LIMIT ${limit}
+            `
+          )
+        : await ctx.db.execute<{
+            hash: string;
+            from_addr: string;
+            to_addr: string | null;
+            value: string;
+            block_height: string;
+            timestamp: string;
+          }>(
+            sql`
+              SELECT t.hash, t.from_addr, t.to_addr, t.value::text,
+                     t.block_height::text, b.timestamp::text
+              FROM ${transactions} t
+              JOIN ${blocks} b ON b.height = t.block_height
+              ORDER BY t.value::numeric DESC, t.block_height DESC
+              LIMIT ${limit}
+            `
+          );
+      return {
+        transfers: (rows as unknown as Array<{
+          hash: string;
+          from_addr: string;
+          to_addr: string | null;
+          value: string;
+          block_height: string;
+          timestamp: string;
+        }>).map((r) => ({
+          hash: r.hash,
+          from: r.from_addr,
+          to: r.to_addr,
+          value: r.value,
+          block_height: Number(r.block_height),
+          timestamp: Number(r.timestamp),
+        })),
+      };
+    }
+  );
 }
 
 function clampLimit(raw: string | undefined): number {
