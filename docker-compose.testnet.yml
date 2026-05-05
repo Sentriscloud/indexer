@@ -1,0 +1,73 @@
+# Testnet indexer stack — runs alongside the mainnet stack on the same
+# host. Separate Postgres DB, separate Redis namespace, separate ports
+# so `docker compose -f docker-compose.yml ...` (mainnet) and
+# `docker compose -f docker-compose.testnet.yml ...` don't collide.
+#
+# Started 2026-05-05 to back the scan-testnet.sentrixchain.com host so
+# /stats/daily, /accounts/active, /contracts/stats, /whale/tx work on
+# testnet too instead of falling through to chain native (which has the
+# genesis-walk hang).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentrix-indexer-testnet-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: indexer
+      POSTGRES_PASSWORD: indexer
+      POSTGRES_DB: sentrix_indexer_testnet
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - ./.docker/postgres-testnet:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U indexer -d sentrix_indexer_testnet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: sentrix-indexer-testnet-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - ./.docker/redis-testnet:/data
+
+  indexer:
+    build:
+      context: .
+      dockerfile: apps/indexer/Dockerfile
+    container_name: sentrix-indexer-testnet-worker
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INDEXER_DATABASE_URL: postgres://indexer:indexer@postgres:5432/sentrix_indexer_testnet
+      INDEXER_NETWORK: testnet
+      INDEXER_HEALTH_PORT: 8084
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:8084:8084"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: sentrix-indexer-testnet-api
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INDEXER_DATABASE_URL: postgres://indexer:indexer@postgres:5432/sentrix_indexer_testnet
+      INDEXER_NETWORK: testnet
+      API_PORT: 8083
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:8083:8083"
