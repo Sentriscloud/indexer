@@ -121,10 +121,41 @@ export interface BlockStreamSub {
   stop: () => void;
 }
 
+/**
+ * Native-shape transaction returned by chain REST `/transactions/<hash>`.
+ * Sentrix exposes its protocol-level tx schema here (sentri amounts,
+ * COINBASE sender sentinel, raw txid without 0x). The viem-shape methods
+ * on this client can't see these fields because the chain's
+ * `eth_getTransactionByHash` returns the same wrapper instead of EVM
+ * spec, so viem throws on the unknown response.
+ */
+export interface NativeTransaction {
+  block_hash: string;
+  block_index: number;
+  block_timestamp: number;
+  transaction: {
+    amount: number;     // sentri — 1 SRX = 1e8 sentri
+    chain_id: number;
+    data: string;
+    fee: number;        // sentri
+    from_address: string; // 0x… hex OR 'COINBASE' sentinel
+    nonce: number;
+    public_key: string;
+    signature: string;
+    timestamp: number;
+    to_address: string;
+    txid: string;       // bare hex, NOT 0x-prefixed
+  };
+}
+
 export class SentrixClient {
   readonly http: PublicClient;
   readonly ws: PublicClient;
   readonly grpcUrl: string;
+  /** Base URL for chain native REST (`/transactions/<hash>`, `/chain/info`,
+   * etc). Same host as JSON-RPC on Sentrix — both speak through the
+   * single chain handler — but addressed without the `/rpc` POST suffix. */
+  readonly restBase: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private grpcStub: any | null = null;
 
@@ -148,12 +179,33 @@ export class SentrixClient {
       ? createPublicClient({ chain, transport: webSocket(wsUrl) })
       : this.http;
 
+    // Strip a trailing `/rpc` so we can address GET endpoints under the
+    // chain native handler at the same host.
+    this.restBase = httpUrl.replace(/\/rpc\/?$/, "");
+
     this.grpcUrl =
       process.env.INDEXER_GRPC_URL ??
       cfg.grpcUrl ??
       (cfg.network === "mainnet"
         ? "grpc.sentrixchain.com:443"
         : "grpc-testnet.sentrixchain.com:443");
+  }
+
+  /** Fetch a transaction from the chain native REST surface. Returns null
+   * on 404 (tx not found) or any non-2xx so the caller can skip cleanly.
+   * Used by the indexer because Sentrix's `eth_getTransactionByHash`
+   * returns this same native shape instead of the EVM-spec shape, so
+   * we can't go through viem here. */
+  async getNativeTransaction(hash: string): Promise<NativeTransaction | null> {
+    // Chain native /transactions/<hash> indexes on the bare-hex form.
+    const bareHash = hash.startsWith("0x") ? hash.slice(2) : hash;
+    try {
+      const r = await fetch(`${this.restBase}/transactions/${bareHash}`);
+      if (!r.ok) return null;
+      return (await r.json()) as NativeTransaction;
+    } catch {
+      return null;
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
