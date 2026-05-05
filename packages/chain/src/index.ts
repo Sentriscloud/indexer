@@ -356,7 +356,20 @@ export class SentrixClient {
     return retry429(() => this.http.getBlockNumber());
   }
 
-  /** Full block w/ all transactions. */
+  /** Full block — but the transactions array may carry hash-only entries.
+   *
+   * Sentrix's `eth_getBlockByNumber` doesn't honor `includeTransactions=true`
+   * (always returns hashes), and `eth_getTransactionByHash` returns the
+   * native `{transaction: {amount, from_address, …}}` shape instead of the
+   * EVM-spec `{blockHash, from, to, value, gas, …}` shape that viem expects.
+   * Viem throws on the unknown response, so we don't try to fill the array
+   * with full tx objects on the indexer side — sync.ts already skips
+   * string entries (`typeof t === "string" → continue`), so the blocks
+   * table populates fine and the transactions table stays empty until
+   * the chain RPC is brought into spec OR the indexer reads tx via the
+   * REST `/transactions/<hash>` shape with a native-format adapter. See
+   * Sentriscloud/indexer issue tracker.
+   */
   async getBlock(height: bigint): Promise<Block<bigint, true>> {
     return retry429(() =>
       this.http.getBlock({ blockNumber: height, includeTransactions: true }),
