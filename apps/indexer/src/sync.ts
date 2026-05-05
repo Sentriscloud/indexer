@@ -16,6 +16,7 @@ import type { Logger } from "pino";
 
 import {
   type DbClient,
+  addresses as addressesTable,
   blocks as blocksTable,
   logs as logsTable,
   meta,
@@ -131,6 +132,46 @@ export async function indexBlock(args: IndexBlockArgs) {
           txType: isCoinbase ? "coinbase" : "native",
         })
         .onConflictDoNothing();
+
+      // Upsert into addresses for both sender and receiver. Without this,
+      // the table sits empty and any "list of addresses I've ever seen on
+      // chain" query (eg `/contracts/stats`, scan's recent-deployments feed)
+      // returns nothing — even though we have millions of indexed txs.
+      // is_contract stays false here; a separate eth_getCode pass marks
+      // it true for addresses with non-empty code (cheap, lazy backfill).
+      // Coinbase sentinel skipped on the from side — the all-zero address
+      // shouldn't claim a balance row from validator rewards.
+      const heightBig = BigInt(height);
+      if (!isCoinbase) {
+        await tx
+          .insert(addressesTable)
+          .values({
+            address: fromAddr,
+            firstSeenBlock: heightBig,
+            lastSeenBlock: heightBig,
+          })
+          .onConflictDoUpdate({
+            target: addressesTable.address,
+            set: {
+              lastSeenBlock: sql`GREATEST(${addressesTable.lastSeenBlock}, EXCLUDED.last_seen_block)`,
+            },
+          });
+      }
+      if (toAddr) {
+        await tx
+          .insert(addressesTable)
+          .values({
+            address: toAddr,
+            firstSeenBlock: heightBig,
+            lastSeenBlock: heightBig,
+          })
+          .onConflictDoUpdate({
+            target: addressesTable.address,
+            set: {
+              lastSeenBlock: sql`GREATEST(${addressesTable.lastSeenBlock}, EXCLUDED.last_seen_block)`,
+            },
+          });
+      }
     }
 
     // Pull all logs in this block in one shot.
