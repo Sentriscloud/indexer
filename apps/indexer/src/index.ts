@@ -19,6 +19,7 @@ import { SentrixClient } from "@sentriscloud/indexer-chain";
 import { eq, sql } from "drizzle-orm";
 
 import { syncOnce, indexBlock } from "./sync.js";
+import { startContractDetector } from "./contract-detect.js";
 import { runCoinblastWorker } from "./coinblast/worker.js";
 
 const log = pino({ name: "indexer", level: process.env.LOG_LEVEL ?? "info" });
@@ -81,6 +82,11 @@ async function main() {
   runCoinblastWorker({ db, chain, network: NETWORK, log }).catch((err) => {
     log.error({ err: String(err) }, "coinblast worker exited unexpectedly");
   });
+
+  // Contract-detect worker — flips addresses.is_contract=true for addresses
+  // with non-empty bytecode. Runs in parallel to backfill + tip on a slow
+  // cadence so it never starves the hot path.
+  const stopContractDetector = startContractDetector({ db, chain, log });
 
   // Phase 1 — backfill.
   log.info("starting backfill phase");
@@ -169,6 +175,11 @@ async function main() {
     log.info({ sig }, "shutting down");
     try {
       watcher.stop();
+    } catch {
+      /* ignore */
+    }
+    try {
+      stopContractDetector();
     } catch {
       /* ignore */
     }
