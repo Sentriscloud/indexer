@@ -229,6 +229,54 @@ export function registerNativeRoutes(
     }
   );
 
+  // ── /contracts/recent ─────────────────────────────────────
+  // List user-deployed contracts ordered by deployment height (most recent
+  // first). Doesn't depend on the transactions table — works the moment
+  // contract-detect.ts marks an address as is_contract=true, which happens
+  // within ~4s of the address landing in the addresses table.
+  //
+  // Why a separate endpoint from /contracts/stats: stats does INNER JOIN
+  // with transactions to count calls, so a freshly-deployed contract with
+  // zero indexed calls (eg backfill not caught up yet) wouldn't show. This
+  // endpoint is the "list everything we know is a contract" surface.
+  app.get<{ Querystring: { limit?: string } }>(
+    "/contracts/recent",
+    async (req) => {
+      const limit = clampLimit(req.query.limit);
+      const rows = await ctx.db.execute<{
+        address: string;
+        first_seen_block: string;
+        last_seen_block: string;
+        code_hash: string | null;
+      }>(
+        sql`
+          SELECT address,
+                 first_seen_block::text,
+                 last_seen_block::text,
+                 code_hash
+          FROM ${addresses}
+          WHERE is_contract = true
+          ORDER BY first_seen_block DESC
+          LIMIT ${limit}
+        `
+      );
+      return {
+        contracts: (rows as unknown as Array<{
+          address: string;
+          first_seen_block: string;
+          last_seen_block: string;
+          code_hash: string | null;
+        }>).map((r, i) => ({
+          rank: i + 1,
+          address: r.address,
+          first_seen_block: Number(r.first_seen_block),
+          last_seen_block: Number(r.last_seen_block),
+          code_hash: r.code_hash,
+        })),
+      };
+    }
+  );
+
   // ── /whale/tx ─────────────────────────────────────────────
   // Whale transfers: top tx by `value` (native SRX in wei via numeric).
   // Used by scan leaderboard /whale/recent. Default threshold is the
