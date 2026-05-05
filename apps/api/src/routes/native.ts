@@ -2,7 +2,7 @@
 // Etherscan-compatible shapes live in routes/etherscan.ts so we can keep this
 // file focused on the natural shape (no `?module=...` cruft).
 
-import { and, asc, desc, eq, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, lte, or, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 
 import {
@@ -15,6 +15,14 @@ import {
 import type { SentrixClient } from "@sentriscloud/indexer-chain";
 
 const MAX_PAGE = 100;
+
+// /stats/daily moved off the chain native API in 2026-05-05 — at h~1.55M the
+// on-chain handler scanned every block from genesis under the state read lock
+// and hung the LB. Indexer side: a single GROUP BY against the timestamp-indexed
+// `blocks` table runs in tens of ms over the full history, so the response
+// covers the full chain (no 14-day cap) and we cache for 5 min to absorb burst.
+const STATS_DAILY_TTL_MS = 5 * 60_000;
+let statsDailyCache: { at: number; data: Array<{ date: string; blocks: number; transactions: number }> } | null = null;
 
 export function registerNativeRoutes(
   app: FastifyInstance,
@@ -102,6 +110,35 @@ export function registerNativeRoutes(
       .orderBy(desc(tokenTransfers.blockHeight))
       .limit(limit);
     return { transfers: rows };
+  });
+
+  // ── /stats/daily ──────────────────────────────────────────
+  // All-time daily activity (blocks + tx count). Used by scan analytics
+  // page. Same JSON shape as the chain native handler so scan can swap
+  // upstream without code change.
+  app.get("/stats/daily", async () => {
+    if (statsDailyCache && Date.now() - statsDailyCache.at < STATS_DAILY_TTL_MS) {
+      return statsDailyCache.data;
+    }
+    const rows = await ctx.db.execute<{ date: string; blocks: string; transactions: string }>(
+      sql`
+        SELECT to_char(to_timestamp(timestamp::bigint), 'YYYY-MM-DD') AS date,
+               count(*)::text AS blocks,
+               COALESCE(sum(tx_count), 0)::text AS transactions
+        FROM ${blocks}
+        GROUP BY 1
+        ORDER BY 1
+      `
+    );
+    const data = (rows as unknown as Array<{ date: string; blocks: string; transactions: string }>).map(
+      (r) => ({
+        date: r.date,
+        blocks: Number(r.blocks),
+        transactions: Number(r.transactions),
+      })
+    );
+    statsDailyCache = { at: Date.now(), data };
+    return data;
   });
 }
 
