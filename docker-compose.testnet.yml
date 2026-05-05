@@ -53,6 +53,15 @@ services:
       LOG_LEVEL: info
     ports:
       - "127.0.0.1:8084:8084"
+    # Override the Dockerfile's built-in healthcheck — the image bakes
+    # `wget http://127.0.0.1:8082/health` (mainnet default) but the
+    # testnet stack runs the worker on 8084 via INDEXER_HEALTH_PORT.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8084/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
   api:
     build:
@@ -71,3 +80,11 @@ services:
       LOG_LEVEL: info
     ports:
       - "127.0.0.1:8083:8083"
+    # Same Dockerfile-port-mismatch story as the worker — bake-time
+    # default is 8081, testnet runs on 8083 via API_PORT env.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8083/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
