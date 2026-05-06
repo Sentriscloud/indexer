@@ -6,6 +6,7 @@
 
 import { and, asc, desc, eq, gte, lt, ne, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
+import { recoverMessageAddress, isAddress, type Hex } from "viem";
 
 import {
   cbTokens,
@@ -15,6 +16,14 @@ import {
 import type { SentrixClient } from "@sentriscloud/indexer-chain";
 
 const MAX_PAGE = 100;
+
+// Reasonable upper-bound caps on metadata field lengths. The DB schema
+// uses unbounded `text` so the limit lives at the API edge.
+const MAX_IMAGE_URL = 256;
+const MAX_DESCRIPTION = 1024;
+const MAX_LINK_URL = 256;
+// 5-minute window — sig replay window. Stamp older than this is rejected.
+const MAX_AGE_MS = 5 * 60 * 1000;
 
 export function registerCoinblastRoutes(
   app: FastifyInstance,
@@ -138,6 +147,108 @@ export function registerCoinblastRoutes(
     return { trades: rows.map(serialiseTrade) };
   });
 
+  // ── POST /coinblast/metadata ───────────────────────────────
+  // Owner-only metadata update for a curve. Auth via EIP-191 signed
+  // message: the curve's `owner_address` (recovered from the supplied
+  // signature) must match what the indexer recorded on CurveCreated.
+  // Without a signature anyone could overwrite anyone else's icon to
+  // grief the launchpad.
+  //
+  // Message shape (kept simple — the curve address + nonce-ish stamp
+  // are enough; the body itself is in the request, replay-windowed by
+  // the stamp):
+  //
+  //   sentrix:cb-meta:<curve_lower>:<stamp_ms>
+  //
+  // Stamp is a unix-ms timestamp. Server rejects if it's outside a
+  // 5-minute window (forward + back) so a leaked sig can't be replayed
+  // a day later by a third party.
+  app.post<{
+    Body: {
+      curve_address?: string;
+      stamp_ms?: number;
+      signature?: string;
+      image_url?: string | null;
+      description?: string | null;
+      twitter_url?: string | null;
+      telegram_url?: string | null;
+      website_url?: string | null;
+    };
+  }>("/coinblast/metadata", async (req, reply) => {
+    const body = req.body ?? {};
+    const curve = body.curve_address?.toLowerCase();
+    if (!curve || !isAddress(curve)) {
+      return reply.code(400).send({ error: "invalid curve_address" });
+    }
+    if (typeof body.stamp_ms !== "number" || !Number.isFinite(body.stamp_ms)) {
+      return reply.code(400).send({ error: "missing stamp_ms" });
+    }
+    const ageMs = Math.abs(Date.now() - body.stamp_ms);
+    if (ageMs > MAX_AGE_MS) {
+      return reply
+        .code(400)
+        .send({ error: "stamp_ms outside 5-minute window" });
+    }
+    if (!body.signature || !/^0x[0-9a-fA-F]+$/.test(body.signature)) {
+      return reply.code(400).send({ error: "missing signature" });
+    }
+
+    // Length-cap each field. Null is OK (clears the field); strings get
+    // trimmed at the cap. We don't strip HTML — frontend renders these
+    // as plain text only (no dangerouslySetInnerHTML).
+    const imageUrl = clampField(body.image_url, MAX_IMAGE_URL);
+    const description = clampField(body.description, MAX_DESCRIPTION);
+    const twitterUrl = clampField(body.twitter_url, MAX_LINK_URL);
+    const telegramUrl = clampField(body.telegram_url, MAX_LINK_URL);
+    const websiteUrl = clampField(body.website_url, MAX_LINK_URL);
+
+    // Look up the curve to get its on-chain owner. If it's not in
+    // cb_tokens the indexer hasn't seen the CurveCreated event yet —
+    // either it was just deployed (transient) or it's not real.
+    const row = await ctx.db
+      .select()
+      .from(cbTokens)
+      .where(eq(cbTokens.curveAddress, curve))
+      .limit(1);
+    if (!row[0]) {
+      return reply.code(404).send({ error: "curve not indexed yet" });
+    }
+
+    const message = `sentrix:cb-meta:${curve}:${body.stamp_ms}`;
+    let recovered: string;
+    try {
+      recovered = (
+        await recoverMessageAddress({
+          message,
+          signature: body.signature as Hex,
+        })
+      ).toLowerCase();
+    } catch (err) {
+      return reply
+        .code(400)
+        .send({ error: "signature recovery failed: " + String(err) });
+    }
+    if (recovered !== row[0].ownerAddress.toLowerCase()) {
+      return reply
+        .code(403)
+        .send({ error: "signer is not curve owner" });
+    }
+
+    await ctx.db
+      .update(cbTokens)
+      .set({
+        imageUrl,
+        description,
+        twitterUrl,
+        telegramUrl,
+        websiteUrl,
+        metadataUpdatedAt: BigInt(Date.now()),
+      })
+      .where(eq(cbTokens.curveAddress, curve));
+
+    return { ok: true, curve_address: curve };
+  });
+
   // ── /coinblast/trades/by-curve/:curve ──────────────────────
   // Convenience for the per-token activity feed. Same as /coinblast/trades
   // with curve= but ordered ascending so a paginated chart plots left→right.
@@ -166,6 +277,20 @@ function clampLimit(raw: string | undefined): number {
   return Math.min(n, MAX_PAGE);
 }
 
+// Treat both null and "" as "clear this field". Trim whitespace on
+// non-empty strings + cap to maxLen so a single huge POST can't blow
+// up the row size beyond what the launchpad UI is built to render.
+function clampField(
+  raw: string | null | undefined,
+  maxLen: number,
+): string | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.slice(0, maxLen);
+}
+
 function serialiseToken(t: typeof cbTokens.$inferSelect) {
   return {
     curve_address: t.curveAddress,
@@ -181,6 +306,14 @@ function serialiseToken(t: typeof cbTokens.$inferSelect) {
     total_volume_srx: t.totalVolumeSrx,
     trade_count: t.tradeCount,
     last_price_srx: t.lastPriceSrx,
+    image_url: t.imageUrl ?? null,
+    description: t.description ?? null,
+    twitter_url: t.twitterUrl ?? null,
+    telegram_url: t.telegramUrl ?? null,
+    website_url: t.websiteUrl ?? null,
+    metadata_updated_at: t.metadataUpdatedAt
+      ? t.metadataUpdatedAt.toString()
+      : null,
   };
 }
 

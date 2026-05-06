@@ -15,6 +15,13 @@
       "when": 1777692360401,
       "tag": "0001_confused_spyke",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1778083616965,
+      "tag": "0002_noisy_hellcat",
+      "breakpoints": true
     }
   ]
 }
