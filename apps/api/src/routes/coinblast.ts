@@ -4,7 +4,7 @@
 // frontend to drop its useDeployedCurves / useCurveTradeStats hooks and
 // hit these endpoints instead, once the launchpad outgrows direct RPC scan.
 
-import { and, asc, desc, eq, lt } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, ne, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 
 import {
@@ -98,6 +98,42 @@ export function registerCoinblastRoutes(
       .from(cbTrades)
       .where(conds.length ? and(...conds) : undefined)
       .orderBy(desc(cbTrades.blockNumber), desc(cbTrades.logIndex))
+      .limit(limit);
+    return { trades: rows.map(serialiseTrade) };
+  });
+
+  // ── /coinblast/whales ───────────────────────────────────────
+  // Buys + sells whose srx_amount crosses a threshold (default 100 SRX).
+  // Threshold is a decimal SRX value; we convert to wei (×1e18) inside
+  // the query against numeric(78,0) `cb_trades.srx_amount`. Graduations
+  // are excluded — they're one-shot supply migrations, not user trades,
+  // and their srx_amount is the total bonded liquidity which would
+  // dominate the panel.
+  //
+  // Order: srx_amount desc tie-broken by block desc, so the panel
+  // surfaces the biggest single trade in the window first and falls
+  // back to recency for equal-size whales.
+  app.get<{
+    Querystring: { limit?: string; threshold?: string };
+  }>("/coinblast/whales", async (req) => {
+    const limit = clampLimit(req.query.limit);
+    const thresholdSrx = parseFloat(req.query.threshold ?? "100");
+    if (!Number.isFinite(thresholdSrx) || thresholdSrx <= 0) {
+      return { trades: [] };
+    }
+    // Multiply by 1e18 in pg-side numeric to keep precision. JS floats
+    // would silently round above ~2^53.
+    const thresholdWei = sql<string>`(${thresholdSrx}::numeric * 1e18::numeric)`;
+    const rows = await ctx.db
+      .select()
+      .from(cbTrades)
+      .where(
+        and(
+          ne(cbTrades.type, "graduated"),
+          gte(cbTrades.srxAmount, thresholdWei),
+        ),
+      )
+      .orderBy(desc(cbTrades.srxAmount), desc(cbTrades.blockNumber))
       .limit(limit);
     return { trades: rows.map(serialiseTrade) };
   });
