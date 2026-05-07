@@ -17,6 +17,25 @@ import type { SentrixClient } from "@sentriscloud/indexer-chain";
 
 const MAX_PAGE = 100;
 
+// Safe BigInt parse — returns parsed value or throws InvalidQueryError so
+// the route handler can convert to a 400 response. Pre-fix sites used
+// raw BigInt(req.query.*) which threw SyntaxError on non-numeric input,
+// surfacing as Fastify 500 instead of an actionable 400.
+function parseBigIntOrThrow(raw: string, field: string): bigint {
+  try {
+    return BigInt(raw);
+  } catch {
+    throw new InvalidQueryError(`invalid ${field}: must be a non-negative integer`);
+  }
+}
+
+class InvalidQueryError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "InvalidQueryError";
+  }
+}
+
 // Reasonable upper-bound caps on metadata field lengths. The DB schema
 // uses unbounded `text` so the limit lives at the API edge.
 const MAX_IMAGE_URL = 256;
@@ -39,7 +58,7 @@ export function registerCoinblastRoutes(
       owner?: string;
       before?: string;
     };
-  }>("/coinblast/tokens", async (req) => {
+  }>("/coinblast/tokens", async (req, reply) => {
     const limit = clampLimit(req.query.limit);
     const conds = [];
     if (req.query.graduated === "true") {
@@ -51,7 +70,8 @@ export function registerCoinblastRoutes(
       conds.push(eq(cbTokens.ownerAddress, req.query.owner.toLowerCase()));
     }
     if (req.query.before) {
-      conds.push(lt(cbTokens.createdBlock, BigInt(req.query.before)));
+      try { conds.push(lt(cbTokens.createdBlock, parseBigIntOrThrow(req.query.before, "before"))); }
+      catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     }
     const rows = await ctx.db
       .select()
@@ -87,7 +107,7 @@ export function registerCoinblastRoutes(
       type?: string;
       before?: string; // block number
     };
-  }>("/coinblast/trades", async (req) => {
+  }>("/coinblast/trades", async (req, reply) => {
     const limit = clampLimit(req.query.limit);
     const conds = [];
     if (req.query.curve) {
@@ -100,7 +120,8 @@ export function registerCoinblastRoutes(
       conds.push(eq(cbTrades.type, req.query.type));
     }
     if (req.query.before) {
-      conds.push(lt(cbTrades.blockNumber, BigInt(req.query.before)));
+      try { conds.push(lt(cbTrades.blockNumber, parseBigIntOrThrow(req.query.before, "before"))); }
+      catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     }
     const rows = await ctx.db
       .select()
@@ -255,11 +276,12 @@ export function registerCoinblastRoutes(
   app.get<{
     Params: { curve: string };
     Querystring: { limit?: string; after?: string };
-  }>("/coinblast/trades/by-curve/:curve", async (req) => {
+  }>("/coinblast/trades/by-curve/:curve", async (req, reply) => {
     const limit = clampLimit(req.query.limit);
     const conds = [eq(cbTrades.curveAddress, req.params.curve.toLowerCase())];
     if (req.query.after) {
-      conds.push(eq(cbTrades.blockNumber, BigInt(req.query.after)));
+      try { conds.push(eq(cbTrades.blockNumber, parseBigIntOrThrow(req.query.after, "after"))); }
+      catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     }
     const rows = await ctx.db
       .select()

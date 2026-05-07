@@ -17,6 +17,26 @@ import type { SentrixClient } from "@sentriscloud/indexer-chain";
 
 const MAX_PAGE = 100;
 
+// Safe BigInt parse — returns undefined on malformed input rather than
+// throwing. Pre-fix sites used raw `BigInt(req.query.before)` which threw
+// SyntaxError on non-numeric strings, surfaced as a Fastify 500 with no
+// actionable error message. This wraps the throw so endpoints can return
+// 400 with a clear "invalid cursor" message and stay alerter-quiet.
+function parseBigIntOrThrow(raw: string, field: string): bigint {
+  try {
+    return BigInt(raw);
+  } catch {
+    throw new InvalidQueryError(`invalid ${field}: must be a non-negative integer`);
+  }
+}
+
+class InvalidQueryError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "InvalidQueryError";
+  }
+}
+
 // /stats/daily moved off the chain native API in 2026-05-05 — at h~1.55M the
 // on-chain handler scanned every block from genesis under the state read lock
 // and hung the LB. Indexer side: a single GROUP BY against the timestamp-indexed
@@ -32,9 +52,13 @@ export function registerNativeRoutes(
   // ── /blocks ───────────────────────────────────────────────
   app.get<{ Querystring: { limit?: string; before?: string } }>(
     "/blocks",
-    async (req) => {
+    async (req, reply) => {
       const limit = clampLimit(req.query.limit);
-      const before = req.query.before ? BigInt(req.query.before) : undefined;
+      let before: bigint | undefined;
+      if (req.query.before) {
+        try { before = parseBigIntOrThrow(req.query.before, "before"); }
+        catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      }
       const rows = await ctx.db
         .select()
         .from(blocks)
@@ -47,7 +71,9 @@ export function registerNativeRoutes(
 
   // ── /blocks/:height ───────────────────────────────────────
   app.get<{ Params: { height: string } }>("/blocks/:height", async (req, reply) => {
-    const h = BigInt(req.params.height);
+    let h: bigint;
+    try { h = parseBigIntOrThrow(req.params.height, "height"); }
+    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
     const row = await ctx.db.select().from(blocks).where(eq(blocks.height, h)).limit(1);
     if (!row[0]) return reply.code(404).send({ error: "block not found" });
     const txs = await ctx.db
