@@ -3,7 +3,7 @@
 # the api server registers via routes/health.ts.
 
 # ── Stage 1: deps ────────────────────────────────────────────────────────
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /app
 
@@ -15,7 +15,7 @@ COPY apps/api/package.json apps/api/
 RUN pnpm install --frozen-lockfile --filter @sentriscloud/indexer-api...
 
 # ── Stage 2: source ──────────────────────────────────────────────────────
-FROM node:22-alpine AS source
+FROM node:26-alpine AS source
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /app
 
@@ -26,7 +26,7 @@ COPY packages/chain/ packages/chain/
 COPY apps/api/ apps/api/
 
 # ── Stage 3: runner ──────────────────────────────────────────────────────
-FROM node:22-alpine AS runner
+FROM node:26-alpine AS runner
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /app
 
