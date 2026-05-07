@@ -77,6 +77,9 @@ export const transactions = pgTable(
     fromIdx: index("txs_from_idx").on(t.fromAddr),
     toIdx: index("txs_to_idx").on(t.toAddr),
     contractIdx: index("txs_contract_idx").on(t.contractAddress),
+    // /whale/tx — ORDER BY value DESC (numeric(78,0) column).
+    // Default B-tree handles DESC fine via index scan in reverse.
+    valueDescIdx: index("txs_value_desc_idx").on(t.value),
   })
 );
 
@@ -131,15 +134,27 @@ export const tokenTransfers = pgTable(
   })
 );
 
-export const addresses = pgTable("addresses", {
-  address: varchar("address", { length: 42 }).primaryKey(),
-  firstSeenBlock: bigint("first_seen_block", { mode: "bigint" }).notNull(),
-  lastSeenBlock: bigint("last_seen_block", { mode: "bigint" }).notNull(),
-  balanceCached: numeric("balance_cached", { precision: 78, scale: 0 }).default("0"),
-  nonce: bigint("nonce", { mode: "bigint" }).default(sql`0`),
-  isContract: boolean("is_contract").notNull().default(false),
-  codeHash: varchar("code_hash", { length: 66 }),
-});
+export const addresses = pgTable(
+  "addresses",
+  {
+    address: varchar("address", { length: 42 }).primaryKey(),
+    firstSeenBlock: bigint("first_seen_block", { mode: "bigint" }).notNull(),
+    lastSeenBlock: bigint("last_seen_block", { mode: "bigint" }).notNull(),
+    balanceCached: numeric("balance_cached", { precision: 78, scale: 0 }).default("0"),
+    nonce: bigint("nonce", { mode: "bigint" }).default(sql`0`),
+    isContract: boolean("is_contract").notNull().default(false),
+    codeHash: varchar("code_hash", { length: 66 }),
+  },
+  (t) => ({
+    // Composite for /contracts/recent — WHERE is_contract = true
+    // ORDER BY first_seen_block DESC. Leading is_contract narrows fast,
+    // first_seen_block sorts inside the narrowed slice.
+    contractRecentIdx: index("addresses_contract_recent_idx").on(
+      t.isContract,
+      t.firstSeenBlock,
+    ),
+  }),
+);
 
 export const validators = pgTable("validators", {
   address: varchar("address", { length: 42 }).primaryKey(),
@@ -265,5 +280,10 @@ export const cbTrades = pgTable(
     curveIdx: index("cb_trades_curve_idx").on(t.curveAddress),
     traderIdx: index("cb_trades_trader_idx").on(t.traderAddress),
     blockIdx: index("cb_trades_block_idx").on(t.blockNumber),
+    // /coinblast/whales — ORDER BY srx_amount DESC, filtered to type !=
+    // 'graduated'. B-tree on srx_amount alone is enough; type filter is
+    // selective only when most trades aren't graduations, but during
+    // active-trading periods that's the common case.
+    srxAmountDescIdx: index("cb_trades_srx_amount_desc_idx").on(t.srxAmount),
   })
 );
