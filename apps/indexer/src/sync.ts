@@ -184,17 +184,24 @@ export async function indexBlock(args: IndexBlockArgs) {
       ) {
         continue;
       }
+      // Normalize address + topics to lowercase before insert. txs.fromAddr
+      // / txs.toAddr already store lowercase (sync.ts:112-114), and downstream
+      // consumers (scan, faucet, indexer endpoints) query with lowercase
+      // WHERE clauses. If we leave logs.address mixed-case (some RPCs return
+      // EIP-55 checksum), JOINs and address-history filters silently miss
+      // events. topics also lowercased for selector-prefix LIKE patterns.
+      const logAddr = l.address.toLowerCase();
       await tx
         .insert(logsTable)
         .values({
           blockHeight: l.blockNumber,
-          txHash: l.transactionHash,
+          txHash: l.transactionHash.toLowerCase(),
           logIndex: l.logIndex,
-          address: l.address,
-          topic0: l.topics[0] ?? null,
-          topic1: l.topics[1] ?? null,
-          topic2: l.topics[2] ?? null,
-          topic3: l.topics[3] ?? null,
+          address: logAddr,
+          topic0: l.topics[0]?.toLowerCase() ?? null,
+          topic1: l.topics[1]?.toLowerCase() ?? null,
+          topic2: l.topics[2]?.toLowerCase() ?? null,
+          topic3: l.topics[3]?.toLowerCase() ?? null,
           data: l.data,
         })
         .onConflictDoNothing();
@@ -209,7 +216,7 @@ export async function indexBlock(args: IndexBlockArgs) {
             blockHeight: l.blockNumber,
             txHash: l.transactionHash,
             logIndex: l.logIndex,
-            contract: l.address,
+            contract: logAddr,
             standard: "erc20",
             fromAddr: topicToAddress(l.topics[1]!),
             toAddr: topicToAddress(l.topics[2]!),
@@ -225,7 +232,7 @@ export async function indexBlock(args: IndexBlockArgs) {
             blockHeight: l.blockNumber,
             txHash: l.transactionHash,
             logIndex: l.logIndex,
-            contract: l.address,
+            contract: logAddr,
             standard: "erc721",
             fromAddr: topicToAddress(l.topics[1]!),
             toAddr: topicToAddress(l.topics[2]!),
@@ -244,7 +251,7 @@ export async function indexBlock(args: IndexBlockArgs) {
             blockHeight: l.blockNumber,
             txHash: l.transactionHash,
             logIndex: l.logIndex,
-            contract: l.address,
+            contract: logAddr,
             standard: "erc1155",
             fromAddr: topicToAddress(l.topics[2]!),
             toAddr: topicToAddress(l.topics[3]!),

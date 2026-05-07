@@ -211,6 +211,18 @@ export const cbTokens = pgTable(
     lastPriceSrx: numeric("last_price_srx", { precision: 78, scale: 0 })
       .notNull()
       .default("0"),
+    // 2026-05-06: rich metadata fields written by POST /coinblast/metadata
+    // (sig-gated to the curve owner). Image is the IPFS URI from /api/pin
+    // on the launchpad frontend; the rest are optional links the launcher
+    // can attach. NULL until the owner posts metadata — frontend falls
+    // back to MOCK_TOKENS / localStorage when these are missing so legacy
+    // launches without metadata don't render as blank cards.
+    imageUrl: text("image_url"),
+    description: text("description"),
+    twitterUrl: text("twitter_url"),
+    telegramUrl: text("telegram_url"),
+    websiteUrl: text("website_url"),
+    metadataUpdatedAt: bigint("metadata_updated_at", { mode: "bigint" }),
   },
   (t) => ({
     ownerIdx: index("cb_tokens_owner_idx").on(t.ownerAddress),
