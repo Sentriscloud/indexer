@@ -23,6 +23,14 @@ const NETWORK = (process.env.INDEXER_NETWORK ?? "mainnet") as
 async function main() {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? "info" },
+    // Caddy fronts every public deployment of this API. Without
+    // trustProxy, request.ip resolves to Caddy's socket IP (127.0.0.1
+    // or container-bridge address) which @fastify/rate-limit then keys
+    // every request to one shared bucket — 120 req/min applies
+    // cluster-wide across all real clients instead of per-client.
+    // Trust the X-Forwarded-For Caddy injects so we get correct
+    // per-client rate-limit buckets.
+    trustProxy: true,
   });
 
   await app.register(cors, { origin: true });
@@ -30,6 +38,9 @@ async function main() {
     max: Number(process.env.API_RATE_LIMIT ?? 120),
     timeWindow: "1 minute",
     cache: 10_000,
+    // Health probes (Docker every 30 s, Caddy upstream heartbeat) would
+    // otherwise eat into the bucket and starve real callers under burst.
+    allowList: (req) => req.url === "/health",
   });
 
   const db = createDb(DB_URL);
