@@ -195,45 +195,64 @@ export function registerNativeRoutes(
   );
 
   // ── /contracts/stats ──────────────────────────────────────
-  // Sort modes: `calls` (count tx with to_addr = contract), `gas_used`
-  // (sum gas_used per contract). Reads `addresses.is_contract` to scope
-  // the join — the indexer marks an address contract on first-deploy
-  // detection (sync.ts).
-  app.get<{ Querystring: { limit?: string; sort?: "calls" | "gas_used" } }>(
+  // Sort modes: `calls` (count tx with to_addr = contract) or `fees`
+  // (sum fee per contract). `gas_used` accepted as a deprecated alias
+  // for `fees` — the original mode summed transactions.gas_used but
+  // sync.ts hard-codes that column to 0n (Sentrix is fee-based, the
+  // native-API tx shape doesn't expose gas), so the leaderboard was
+  // sorting on all-zero data. Sentrix's `fee` is the equivalent
+  // user-pays-this-much-to-call-the-contract metric.
+  //
+  // Response keeps `gas_used` for backwards compat (returns 0) plus
+  // new `fees_total` (raw wei). UI consumers should switch to
+  // fees_total + ?sort=fees.
+  app.get<{ Querystring: { limit?: string; sort?: "calls" | "fees" | "gas_used" } }>(
     "/contracts/stats",
     async (req) => {
       const limit = clampLimit(req.query.limit);
-      const sort = req.query.sort === "gas_used" ? "gas_used" : "calls";
-      if (sort === "gas_used") {
-        const rows = await ctx.db.execute<{ address: string; gas_used: string; calls: string }>(
+      const sort =
+        req.query.sort === "fees" || req.query.sort === "gas_used" ? "fees" : "calls";
+      if (sort === "fees") {
+        const rows = await ctx.db.execute<{
+          address: string;
+          fees_total: string;
+          calls: string;
+        }>(
           sql`
             SELECT t.to_addr AS address,
-                   COALESCE(sum(t.gas_used), 0)::text AS gas_used,
+                   COALESCE(sum(t.fee), 0)::text AS fees_total,
                    count(*)::text AS calls
             FROM ${transactions} t
             JOIN ${addresses} a ON a.address = t.to_addr AND a.is_contract = true
             WHERE t.to_addr IS NOT NULL
             GROUP BY t.to_addr
-            ORDER BY sum(t.gas_used) DESC NULLS LAST
+            ORDER BY sum(t.fee) DESC NULLS LAST
             LIMIT ${limit}
           `
         );
         return {
-          contracts: (rows as unknown as Array<{ address: string; gas_used: string; calls: string }>).map(
-            (r, i) => ({
-              rank: i + 1,
-              address: r.address,
-              gas_used: Number(r.gas_used),
-              calls: Number(r.calls),
-            })
-          ),
+          contracts: (rows as unknown as Array<{
+            address: string;
+            fees_total: string;
+            calls: string;
+          }>).map((r, i) => ({
+            rank: i + 1,
+            address: r.address,
+            fees_total: r.fees_total,
+            gas_used: 0,
+            calls: Number(r.calls),
+          })),
         };
       }
-      const rows = await ctx.db.execute<{ address: string; calls: string; gas_used: string }>(
+      const rows = await ctx.db.execute<{
+        address: string;
+        calls: string;
+        fees_total: string;
+      }>(
         sql`
           SELECT t.to_addr AS address,
                  count(*)::text AS calls,
-                 COALESCE(sum(t.gas_used), 0)::text AS gas_used
+                 COALESCE(sum(t.fee), 0)::text AS fees_total
           FROM ${transactions} t
           JOIN ${addresses} a ON a.address = t.to_addr AND a.is_contract = true
           WHERE t.to_addr IS NOT NULL
@@ -243,14 +262,17 @@ export function registerNativeRoutes(
         `
       );
       return {
-        contracts: (rows as unknown as Array<{ address: string; calls: string; gas_used: string }>).map(
-          (r, i) => ({
-            rank: i + 1,
-            address: r.address,
-            calls: Number(r.calls),
-            gas_used: Number(r.gas_used),
-          })
-        ),
+        contracts: (rows as unknown as Array<{
+          address: string;
+          calls: string;
+          fees_total: string;
+        }>).map((r, i) => ({
+          rank: i + 1,
+          address: r.address,
+          calls: Number(r.calls),
+          fees_total: r.fees_total,
+          gas_used: 0,
+        })),
       };
     }
   );
