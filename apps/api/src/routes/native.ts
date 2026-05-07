@@ -321,11 +321,18 @@ export function registerNativeRoutes(
         try { parseBigIntOrThrow(threshold, "threshold"); }
         catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
       }
-      // Drop the redundant `::numeric` casts on `value` — column is
-      // already numeric(78,0). Wrapping the column in a cast made the
-      // planner treat ORDER BY as an expression and refuse the
-      // txs_value_desc_idx B-tree (parallel seq scan, ~58k cost). With
-      // the casts gone the planner uses Index Scan Backward (~1 cost).
+      // Two reasons for the CTE shape:
+      //
+      // 1) Drop redundant `::numeric` casts. value is already
+      //    numeric(78,0) and wrapping the column in a cast made the
+      //    planner treat ORDER BY as an expression and refuse the
+      //    txs_value_desc_idx B-tree.
+      // 2) Push the LIMIT inside a transactions-only subquery before the
+      //    JOIN with blocks. With the JOIN in scope, the planner picked
+      //    Parallel Hash Join + Parallel Seq Scan (~1.6 s on testnet
+      //    1.2 M rows) instead of Index Scan Backward, because the
+      //    secondary sort key block_height DESC pushed it off the
+      //    index. Top-N first, then JOIN on N rows is ~5 ms.
       const rows = threshold
         ? await ctx.db.execute<{
             hash: string;
@@ -336,13 +343,18 @@ export function registerNativeRoutes(
             timestamp: string;
           }>(
             sql`
+              WITH top_txs AS (
+                SELECT hash, from_addr, to_addr, value, block_height
+                FROM ${transactions}
+                WHERE value >= ${threshold}::numeric
+                ORDER BY value DESC
+                LIMIT ${limit}
+              )
               SELECT t.hash, t.from_addr, t.to_addr, t.value::text,
                      t.block_height::text, b.timestamp::text
-              FROM ${transactions} t
+              FROM top_txs t
               JOIN ${blocks} b ON b.height = t.block_height
-              WHERE t.value >= ${threshold}::numeric
               ORDER BY t.value DESC, t.block_height DESC
-              LIMIT ${limit}
             `
           )
         : await ctx.db.execute<{
@@ -354,12 +366,17 @@ export function registerNativeRoutes(
             timestamp: string;
           }>(
             sql`
+              WITH top_txs AS (
+                SELECT hash, from_addr, to_addr, value, block_height
+                FROM ${transactions}
+                ORDER BY value DESC
+                LIMIT ${limit}
+              )
               SELECT t.hash, t.from_addr, t.to_addr, t.value::text,
                      t.block_height::text, b.timestamp::text
-              FROM ${transactions} t
+              FROM top_txs t
               JOIN ${blocks} b ON b.height = t.block_height
               ORDER BY t.value DESC, t.block_height DESC
-              LIMIT ${limit}
             `
           );
       return {
