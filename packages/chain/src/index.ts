@@ -199,13 +199,28 @@ export class SentrixClient {
   async getNativeTransaction(hash: string): Promise<NativeTransaction | null> {
     // Chain native /transactions/<hash> indexes on the bare-hex form.
     const bareHash = hash.startsWith("0x") ? hash.slice(2) : hash;
-    try {
-      const r = await fetch(`${this.restBase}/transactions/${bareHash}`);
-      if (!r.ok) return null;
-      return (await r.json()) as NativeTransaction;
-    } catch {
-      return null;
+    // Retry on transient failures (network errors, 5xx, 429) — without
+    // this a single network blip during a block's tx-fetch loop drops
+    // the tx silently from the indexer (sync.ts: `if (!native) continue`)
+    // and the block advances last_synced_height, so the missed tx is
+    // never re-fetched. 404 is treated as terminal — that one means the
+    // chain genuinely doesn't have the tx.
+    let delayMs = 250;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const r = await fetch(`${this.restBase}/transactions/${bareHash}`);
+        if (r.status === 404) return null;
+        if (r.ok) return (await r.json()) as NativeTransaction;
+        // Non-2xx, non-404 → retry. Falls through to backoff below.
+      } catch {
+        // Network error / aborted fetch → retry. Falls through.
+      }
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        delayMs *= 2;
+      }
     }
+    return null;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

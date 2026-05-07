@@ -74,19 +74,25 @@ export async function indexBlock(args: IndexBlockArgs) {
   // We do all writes inside a single transaction so a partial block never
   // ends up in the DB on crash.
   await db.transaction(async (tx) => {
+    // Lowercase every 0x-prefixed field on insert. Today the chain RPC
+    // returns lowercase but viem doesn't guarantee that across versions
+    // and some EVM RPCs return EIP-55 checksum. Downstream queries all
+    // assume lowercase storage (sync.ts:112-114, routes/*.ts toLowerCase
+    // on every WHERE), so any mixed-case row would silently break JOINs
+    // and address-history filters.
     await tx
       .insert(blocksTable)
       .values({
         height,
-        hash: block.hash ?? "0x",
-        parentHash: block.parentHash,
+        hash: block.hash?.toLowerCase() ?? "0x",
+        parentHash: block.parentHash.toLowerCase(),
         timestamp: block.timestamp,
-        validator: block.miner ?? "0x0000000000000000000000000000000000000000",
+        validator: (block.miner ?? "0x0000000000000000000000000000000000000000").toLowerCase(),
         gasUsed: block.gasUsed ?? 0n,
         gasLimit: block.gasLimit ?? 0n,
         baseFee: block.baseFeePerGas?.toString() ?? null,
         txCount: block.transactions.length,
-        stateRoot: block.stateRoot ?? null,
+        stateRoot: block.stateRoot?.toLowerCase() ?? null,
       })
       .onConflictDoNothing();
 
@@ -106,7 +112,19 @@ export async function indexBlock(args: IndexBlockArgs) {
       const entry = block.transactions[i];
       const hash = typeof entry === "string" ? entry : entry.hash;
       const native = await chain.getNativeTransaction(hash);
-      if (!native) continue; // 404 or fetch error — skip, will retry on resync
+      if (!native) {
+        // Either a true 404 (chain pruned / never had it) or persistent
+        // transient failure after the client's 4 retries. Either way the
+        // tx is permanently missing from this block's indexed set —
+        // last_synced_height will still advance because the surrounding
+        // transaction commits, so log loud enough that an operator can
+        // grep journalctl after the fact.
+        log.warn(
+          { hash, height: height.toString() },
+          "getNativeTransaction returned null — tx skipped",
+        );
+        continue;
+      }
       const inner = native.transaction;
       const isCoinbase = inner.from_address === "COINBASE";
       const fromAddr = isCoinbase ? ZERO : inner.from_address.toLowerCase();
@@ -214,7 +232,7 @@ export async function indexBlock(args: IndexBlockArgs) {
           .insert(tokenTransfers)
           .values({
             blockHeight: l.blockNumber,
-            txHash: l.transactionHash,
+            txHash: l.transactionHash.toLowerCase(),
             logIndex: l.logIndex,
             contract: logAddr,
             standard: "erc20",
@@ -230,7 +248,7 @@ export async function indexBlock(args: IndexBlockArgs) {
           .insert(tokenTransfers)
           .values({
             blockHeight: l.blockNumber,
-            txHash: l.transactionHash,
+            txHash: l.transactionHash.toLowerCase(),
             logIndex: l.logIndex,
             contract: logAddr,
             standard: "erc721",
@@ -249,7 +267,7 @@ export async function indexBlock(args: IndexBlockArgs) {
           .insert(tokenTransfers)
           .values({
             blockHeight: l.blockNumber,
-            txHash: l.transactionHash,
+            txHash: l.transactionHash.toLowerCase(),
             logIndex: l.logIndex,
             contract: logAddr,
             standard: "erc1155",
