@@ -96,20 +96,25 @@ export async function runCoinblastWorker(args: WorkerArgs) {
   // Backfill loop — walks forward until cursor >= tip - SAFE_LAG, then
   // continues in tail mode. Same code path; the upper bound is just
   // recomputed each iteration.
+  //
+  // The outer try/catch covers getBlockNumber() too, not just runChunk —
+  // pre-fix a chain blip during the tip read crashed the worker out of
+  // the while-loop into the caller's `.catch` in index.ts which logs
+  // 'coinblast worker exited unexpectedly' and never restarts it.
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const tip = await chain.getBlockNumber();
-    const target = tip - SAFE_LAG;
-    if (cursor >= target) {
-      // Caught up. Sleep a bit then re-check.
-      await sleep(TICK_MS * 4);
-      continue;
-    }
-
-    const from = cursor + 1n;
-    const to = from + CHUNK - 1n > target ? target : from + CHUNK - 1n;
-
     try {
+      const tip = await chain.getBlockNumber();
+      const target = tip - SAFE_LAG;
+      if (cursor >= target) {
+        // Caught up. Sleep a bit then re-check.
+        await sleep(TICK_MS * 4);
+        continue;
+      }
+
+      const from = cursor + 1n;
+      const to = from + CHUNK - 1n > target ? target : from + CHUNK - 1n;
+
       await runChunk({
         db,
         chain,
@@ -128,8 +133,8 @@ export async function runCoinblastWorker(args: WorkerArgs) {
       );
     } catch (err) {
       log.error(
-        { err: String(err), from: from.toString(), to: to.toString() },
-        "coinblast: chunk failed; retrying after backoff",
+        { err: String(err), cursor: cursor.toString() },
+        "coinblast: iteration failed; retrying after backoff",
       );
       await sleep(2000);
     }
