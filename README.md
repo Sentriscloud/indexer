@@ -44,9 +44,7 @@ Sentrix node (rpc.sentrixchain.com)
 - **Fastify 5** — REST API
 - **Drizzle ORM + Postgres 16** — schema source-of-truth
 - **viem ^2** — EVM RPC client
-- **BullMQ + Redis** — backfill workers, reorg detection, token enrichment
 - **Pino** — structured logs
-- **Vitest** — tests
 - **Turborepo + pnpm workspaces**
 
 ## Repo layout
@@ -67,12 +65,12 @@ Sentrix node (rpc.sentrixchain.com)
 
 ```bash
 pnpm install
-docker compose up -d postgres redis
+docker compose up -d postgres
 pnpm db:generate && pnpm db:migrate
 pnpm dev
 ```
 
-API will come up on `:8081`, indexer worker on `:8082` (health check), Postgres on `:5432`, Redis on `:6379`.
+API will come up on `:8081`, indexer worker on `:8082` (health check), Postgres on `:5432`.
 
 ## Endpoints — Phase 1
 
