@@ -3,7 +3,7 @@
 // existing tool" entry point. Only a Phase 1 subset is implemented; unknown
 // modules return a friendly 400 instead of 404 so consumers see what's missing.
 
-import { desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, gte, lte, or, type SQL } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 
 import {
@@ -61,16 +61,22 @@ async function handleAccount(
       return { status: "1", message: "OK", result: wei.toString() };
     }
     case "txlist": {
-      const limit = clampLimit(q.offset);
+      const { limit, offsetRows } = pageOffset(q);
       const order = q.sort === "asc" ? "asc" : "desc";
+      const rangeFilter = blockRangeFilter(q, transactions.blockHeight);
+      const addrFilter = or(
+        eq(transactions.fromAddr, addr),
+        eq(transactions.toAddr, addr),
+      );
       const rows = await ctx.db
         .select()
         .from(transactions)
-        .where(or(eq(transactions.fromAddr, addr), eq(transactions.toAddr, addr)))
+        .where(rangeFilter ? and(addrFilter, rangeFilter) : addrFilter)
         .orderBy(
           order === "asc" ? transactions.blockHeight : desc(transactions.blockHeight)
         )
-        .limit(limit);
+        .limit(limit)
+        .offset(offsetRows);
       return {
         status: rows.length ? "1" : "0",
         message: rows.length ? "OK" : "No transactions found",
@@ -78,13 +84,19 @@ async function handleAccount(
       };
     }
     case "tokentx": {
-      const limit = clampLimit(q.offset);
+      const { limit, offsetRows } = pageOffset(q);
+      const rangeFilter = blockRangeFilter(q, tokenTransfers.blockHeight);
+      const addrFilter = or(
+        eq(tokenTransfers.fromAddr, addr),
+        eq(tokenTransfers.toAddr, addr),
+      );
       const rows = await ctx.db
         .select()
         .from(tokenTransfers)
-        .where(or(eq(tokenTransfers.fromAddr, addr), eq(tokenTransfers.toAddr, addr)))
+        .where(rangeFilter ? and(addrFilter, rangeFilter) : addrFilter)
         .orderBy(desc(tokenTransfers.blockHeight))
-        .limit(limit);
+        .limit(limit)
+        .offset(offsetRows);
       return {
         status: rows.length ? "1" : "0",
         message: rows.length ? "OK" : "No transfers found",
@@ -130,6 +142,34 @@ function clampLimit(raw: string | undefined): number {
   const n = raw ? parseInt(raw, 10) : 25;
   if (!Number.isFinite(n) || n <= 0) return 25;
   return Math.min(n, 100);
+}
+
+// Etherscan API pagination is `page` (1-indexed) + `offset` (rows-per-
+// page). Pre-fix we treated `offset` as the limit and never honored
+// `page`, so tools paginating past the first page silently got the
+// same first 100 rows back.
+function pageOffset(q: EsQuery): { limit: number; offsetRows: number } {
+  const limit = clampLimit(q.offset);
+  const page = q.page ? parseInt(q.page, 10) : 1;
+  const safePage = Number.isFinite(page) && page > 0 ? page : 1;
+  return { limit, offsetRows: (safePage - 1) * limit };
+}
+
+// Etherscan API also accepts `startblock` + `endblock`. Pre-fix these
+// were declared in EsQuery but never wired to the WHERE clause —
+// callers passing a block range got results outside it.
+function blockRangeFilter(
+  q: EsQuery,
+  col: typeof transactions.blockHeight | typeof tokenTransfers.blockHeight,
+): SQL | undefined {
+  const start = q.startblock ? parseInt(q.startblock, 10) : NaN;
+  const end = q.endblock ? parseInt(q.endblock, 10) : NaN;
+  const startOk = Number.isFinite(start) && start >= 0;
+  const endOk = Number.isFinite(end) && end >= 0;
+  if (startOk && endOk) return and(gte(col, BigInt(start)), lte(col, BigInt(end)));
+  if (startOk) return gte(col, BigInt(start));
+  if (endOk) return lte(col, BigInt(end));
+  return undefined;
 }
 
 function toEtherscanTx(t: typeof transactions.$inferSelect) {
