@@ -94,6 +94,8 @@ FILES=(
   apps/indexer/src/index.ts
   apps/indexer/src/sync.ts
   packages/chain/src/index.ts
+  packages/db/package.json
+  packages/db/src/migrate.ts
   packages/db/src/schema.ts
   packages/db/drizzle/0003_youthful_prima.sql
   packages/db/drizzle/meta/_journal.json
@@ -125,13 +127,10 @@ echo "==> one-time cleanup: stop dead redis container if it's still around"
 # already be running on a host that was provisioned earlier.
 ssh "$HOST" 'docker stop sentrix-indexer-redis 2>/dev/null || true; docker rm sentrix-indexer-redis 2>/dev/null || true'
 
-echo "==> install + migrate (api/indexer images do their own pnpm install at build, but db migrate runs from host)"
-ssh "$HOST" 'cd ~/indexer-deploy && pnpm install --frozen-lockfile --filter @sentriscloud/indexer-db && pnpm --filter @sentriscloud/indexer-db migrate' 2>&1 | tail -8 || {
-  echo "✗ migrate failed (above)" >&2
-  exit 1
-}
-
 echo "==> rebuild api + indexer images"
+# Migrations run inside the indexer container at boot now (PR #28). No
+# separate `pnpm db:migrate` step needed; the embedded runner is
+# idempotent (~10 ms no-op when schema is current).
 ssh "$HOST" 'cd ~/indexer-deploy && docker compose -f docker-compose.yml build api indexer' 2>&1 | tail -3
 
 echo "==> recreate containers"
