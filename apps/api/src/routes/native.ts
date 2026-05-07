@@ -321,6 +321,11 @@ export function registerNativeRoutes(
         try { parseBigIntOrThrow(threshold, "threshold"); }
         catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
       }
+      // Drop the redundant `::numeric` casts on `value` — column is
+      // already numeric(78,0). Wrapping the column in a cast made the
+      // planner treat ORDER BY as an expression and refuse the
+      // txs_value_desc_idx B-tree (parallel seq scan, ~58k cost). With
+      // the casts gone the planner uses Index Scan Backward (~1 cost).
       const rows = threshold
         ? await ctx.db.execute<{
             hash: string;
@@ -335,8 +340,8 @@ export function registerNativeRoutes(
                      t.block_height::text, b.timestamp::text
               FROM ${transactions} t
               JOIN ${blocks} b ON b.height = t.block_height
-              WHERE t.value::numeric >= ${threshold}::numeric
-              ORDER BY t.value::numeric DESC, t.block_height DESC
+              WHERE t.value >= ${threshold}::numeric
+              ORDER BY t.value DESC, t.block_height DESC
               LIMIT ${limit}
             `
           )
@@ -353,7 +358,7 @@ export function registerNativeRoutes(
                      t.block_height::text, b.timestamp::text
               FROM ${transactions} t
               JOIN ${blocks} b ON b.height = t.block_height
-              ORDER BY t.value::numeric DESC, t.block_height DESC
+              ORDER BY t.value DESC, t.block_height DESC
               LIMIT ${limit}
             `
           );
