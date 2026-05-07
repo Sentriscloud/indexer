@@ -310,9 +310,17 @@ export function registerNativeRoutes(
   // tx with value >= X (in raw wei, 18-decimal). Scan side converts.
   app.get<{ Querystring: { limit?: string; threshold?: string } }>(
     "/whale/tx",
-    async (req) => {
+    async (req, reply) => {
       const limit = clampLimit(req.query.limit);
       const threshold = req.query.threshold;
+      // Postgres ${threshold}::numeric in the SQL below 500s on malformed
+      // input ('abc' → 22P02). Validate here so the user sees a 400 with
+      // a clear message + the alerter stays quiet. parseBigIntOrThrow
+      // is the right shape — wei amounts are integers anyway, no decimal.
+      if (threshold !== undefined) {
+        try { parseBigIntOrThrow(threshold, "threshold"); }
+        catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+      }
       const rows = threshold
         ? await ctx.db.execute<{
             hash: string;
