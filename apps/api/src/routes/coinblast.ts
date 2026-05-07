@@ -215,13 +215,25 @@ export function registerCoinblastRoutes(
     }
 
     // Length-cap each field. Null is OK (clears the field); strings get
-    // trimmed at the cap. We don't strip HTML — frontend renders these
-    // as plain text only (no dangerouslySetInnerHTML).
-    const imageUrl = clampField(body.image_url, MAX_IMAGE_URL);
+    // trimmed at the cap. We don't strip HTML — current frontend renders
+    // these as plain text — but URL fields are still scheme-checked at
+    // the edge so a future consumer can't get sandbagged by a stored
+    // `javascript:` href.
+    const imageUrl = clampUrl(body.image_url, MAX_IMAGE_URL);
     const description = clampField(body.description, MAX_DESCRIPTION);
-    const twitterUrl = clampField(body.twitter_url, MAX_LINK_URL);
-    const telegramUrl = clampField(body.telegram_url, MAX_LINK_URL);
-    const websiteUrl = clampField(body.website_url, MAX_LINK_URL);
+    const twitterUrl = clampUrl(body.twitter_url, MAX_LINK_URL);
+    const telegramUrl = clampUrl(body.telegram_url, MAX_LINK_URL);
+    const websiteUrl = clampUrl(body.website_url, MAX_LINK_URL);
+    if (
+      (body.image_url != null && imageUrl === null && body.image_url !== "") ||
+      (body.twitter_url != null && twitterUrl === null && body.twitter_url !== "") ||
+      (body.telegram_url != null && telegramUrl === null && body.telegram_url !== "") ||
+      (body.website_url != null && websiteUrl === null && body.website_url !== "")
+    ) {
+      return reply
+        .code(400)
+        .send({ error: "url fields must start with http:// or https://" });
+    }
 
     // Look up the curve to get its on-chain owner. If it's not in
     // cb_tokens the indexer hasn't seen the CurveCreated event yet —
@@ -311,6 +323,20 @@ function clampField(
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
   return trimmed.slice(0, maxLen);
+}
+
+// Same as clampField but enforces an http(s) scheme on top — blocks
+// `javascript:`, `data:`, `file:`, `vbscript:` and friends. The route
+// caller treats `null` on a non-empty input as a validation error so
+// users see a 400 instead of a silent clear.
+function clampUrl(
+  raw: string | null | undefined,
+  maxLen: number,
+): string | null {
+  const v = clampField(raw, maxLen);
+  if (v === null) return null;
+  if (!/^https?:\/\//i.test(v)) return null;
+  return v;
 }
 
 function serialiseToken(t: typeof cbTokens.$inferSelect) {
