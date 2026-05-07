@@ -124,6 +124,14 @@ async function main() {
   // behind), we trigger a JSON-RPC backfill catch-up rather than silently
   // missing blocks.
   let inflight: Promise<void> | null = null;
+  // Pending-tip queue. When a new event arrives while inflight is busy,
+  // we used to drop it ('if (inflight) return') and rely on the *next*
+  // chain block to re-trigger the catch-up loop. That assumption fails
+  // if the chain halts right after a burst — missed blocks stay
+  // unindexed until either a new chain block lands or the indexer is
+  // restarted into Phase 1. Track the latest dropped height instead so
+  // the in-flight loop drains to it before releasing the gate.
+  let pendingTip: bigint | null = null;
   const startTail = Date.now();
   let dashTicks = 0;
 
@@ -166,14 +174,35 @@ async function main() {
       );
 
       // Index every block from synced+1 to the new tip. Single-flight so
-      // overlapping pushes don't double-write.
-      if (inflight) return;
+      // overlapping pushes don't double-write — but record the latest
+      // pending tip so the in-flight loop drains to it before releasing.
+      if (inflight) {
+        if (pendingTip === null || ev.height > pendingTip) {
+          pendingTip = ev.height;
+        }
+        return;
+      }
       inflight = (async () => {
         try {
-          let h = synced + 1n;
-          while (h <= ev.height) {
-            await indexBlock({ db, chain, height: h, log });
-            h++;
+          let target = ev.height;
+          while (true) {
+            const cur = await readMeta(db, "last_synced_height");
+            let h = cur + 1n;
+            while (h <= target) {
+              await indexBlock({ db, chain, height: h, log });
+              h++;
+            }
+            // Did a later event come in while we were running? Drain it
+            // before letting go of the gate, otherwise a burst tail (eg
+            // chain halts right after) leaves the dropped heights stuck
+            // until the next chain block triggers another callback.
+            if (pendingTip !== null && pendingTip > target) {
+              target = pendingTip;
+              pendingTip = null;
+              continue;
+            }
+            pendingTip = null;
+            break;
           }
         } catch (err) {
           log.error({ err: String(err) }, "tail indexBlock failed");
