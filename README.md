@@ -1,5 +1,10 @@
 # @sentriscloud/indexer
 
+[![CI](https://github.com/Sentriscloud/indexer/actions/workflows/ci.yml/badge.svg)](https://github.com/Sentriscloud/indexer/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Sentriscloud/indexer)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/Sentriscloud/indexer?include_prereleases&sort=semver)](https://github.com/Sentriscloud/indexer/releases/latest)
+
+
 Postgres-backed REST indexer for Sentrix Chain. Sources every block, transaction,
 and log from the public RPC + WebSocket endpoints, decodes ERC-20/721/1155 transfers,
 tracks reorgs, and exposes the result as an Etherscan-API-compatible REST surface
