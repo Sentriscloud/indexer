@@ -1,6 +1,6 @@
 # Testnet indexer stack — runs alongside the mainnet stack on the same
-# host. Separate Postgres DB, separate Redis namespace, separate ports
-# so `docker compose -f docker-compose.yml ...` (mainnet) and
+# host. Separate Postgres DB + separate ports so
+# `docker compose -f docker-compose.yml ...` (mainnet) and
 # `docker compose -f docker-compose.testnet.yml ...` don't collide.
 #
 # Started 2026-05-05 to back the scan-testnet.sentrixchain.com host so
@@ -26,15 +26,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: sentrix-indexer-testnet-redis
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6380:6379"
-    volumes:
-      - ./.docker/redis-testnet:/data
 
   indexer:
     build:
