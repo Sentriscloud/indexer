@@ -9,7 +9,15 @@ export function registerHealthRoutes(
   ctx: { db: DbClient; chain: SentrixClient; network: string }
 ) {
   app.get("/health", async () => {
-    const tip = await ctx.chain.getBlockNumber().catch(() => null);
+    // Cap the chain probe at 3 s so /health responds within Docker's 5 s
+    // healthcheck timeout even when the chain RPC is unreachable (mid-
+    // migration, network blip). Without this the route hangs on viem's
+    // ~10 s default × retry429 = ~22 s, container goes unhealthy →
+    // restart loop right when we least want it.
+    const tip = await Promise.race([
+      ctx.chain.getBlockNumber(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+    ]).catch(() => null);
     const synced = await ctx.db
       .select({ value: meta.value })
       .from(meta)

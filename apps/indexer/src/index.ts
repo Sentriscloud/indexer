@@ -165,8 +165,27 @@ async function main() {
       })();
     },
     {
-      onError: (err) => log.warn({ err: String(err) }, "grpc stream error (reconnecting)"),
-      onReconnect: (attempt) => log.info({ attempt }, "grpc stream reconnect"),
+      // Log throttling: during a long chain outage the stream can fail
+      // hundreds of times (each retry = ~8 s at the cap). Without these
+      // throttles we'd dump 1000+ identical lines into the journal.
+      // Errors: log first occurrence, then once per minute.
+      // Reconnect attempts: log at powers of 2 (2, 4, 8, 16, 32, …) so
+      // the curve stays visible without spamming.
+      onError: (() => {
+        let lastLog = 0;
+        return (err: unknown) => {
+          const now = Date.now();
+          if (now - lastLog > 60_000) {
+            log.warn({ err: String(err) }, "grpc stream error (reconnecting)");
+            lastLog = now;
+          }
+        };
+      })(),
+      onReconnect: (attempt) => {
+        if (attempt <= 4 || (attempt & (attempt - 1)) === 0) {
+          log.info({ attempt }, "grpc stream reconnect");
+        }
+      },
     },
   );
 
