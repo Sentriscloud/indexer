@@ -89,12 +89,30 @@ async function main() {
   const stopContractDetector = startContractDetector({ db, chain, log });
 
   // Phase 1 — backfill.
+  // Errors here (5xx burst, network blip, mid-block fetch failure) used
+  // to bubble up out of main and crash the process — Docker restart
+  // recovers but loses warm caches and re-runs already-indexed blocks
+  // from scratch. Retry-with-backoff inside the loop keeps the worker
+  // alive through transient chain wobble. Idempotent inserts on the
+  // sync.ts side mean re-running the same height after partial failure
+  // is safe.
   log.info("starting backfill phase");
+  let backoffMs = 1_000;
   while (true) {
-    const tip = await chain.getBlockNumber();
-    const target = tip - SAFE_LAG;
-    const synced = await syncOnce({ db, chain, target, log });
-    if (synced >= target) break;
+    try {
+      const tip = await chain.getBlockNumber();
+      const target = tip - SAFE_LAG;
+      const synced = await syncOnce({ db, chain, target, log });
+      if (synced >= target) break;
+      backoffMs = 1_000;
+    } catch (err) {
+      log.warn(
+        { err: String(err), backoff_ms: backoffMs },
+        "backfill iteration failed — retrying after backoff",
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 30_000);
+    }
   }
   log.info("backfill caught up to tip - SAFE_LAG; entering tail phase");
 
