@@ -5,7 +5,7 @@
 # this repo's `engines` + `packageManager` pinning.
 
 # ── Stage 1: deps ────────────────────────────────────────────────────────
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY apps/indexer/package.json apps/indexer/
 RUN pnpm install --frozen-lockfile --filter @sentriscloud/indexer-worker...
 
 # ── Stage 2: source ──────────────────────────────────────────────────────
-FROM node:22-alpine AS source
+FROM node:26-alpine AS source
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /app
 
@@ -35,7 +35,7 @@ COPY apps/indexer/ apps/indexer/
 # needing every package to re-emit a separate dist tree.
 
 # ── Stage 3: runner ──────────────────────────────────────────────────────
-FROM node:22-alpine AS runner
+FROM node:26-alpine AS runner
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /app
 
