@@ -15,6 +15,7 @@ import Fastify from "fastify";
 import pino from "pino";
 
 import { createDb, blocks, meta } from "@sentriscloud/indexer-db";
+import { runMigrations } from "@sentriscloud/indexer-db/migrate";
 import { SentrixClient } from "@sentriscloud/indexer-chain";
 import { eq, sql } from "drizzle-orm";
 
@@ -47,13 +48,29 @@ const HEALTH_PORT = Number(process.env.INDEXER_HEALTH_PORT ?? 8082);
 const SAFE_LAG = BigInt(process.env.INDEXER_SAFE_LAG ?? 5);
 
 async function main() {
+  // Apply any pending migrations BEFORE we open the long-lived db pool +
+  // start the sync loop. Drizzle's __drizzle_migrations table makes this
+  // idempotent so a restart on an up-to-date schema is a no-op (~10 ms).
+  // Without this every deploy of new SQL needed a separate manual
+  // `pnpm db:migrate` step that was easy to forget.
+  log.info("running migrations");
+  await runMigrations(DB_URL);
+  log.info("migrations applied");
+
   const db = createDb(DB_URL);
   const chain = new SentrixClient({ network: NETWORK });
 
   // Health server.
   const app = Fastify({ logger: false });
   app.get("/health", async () => {
-    const tip = await chain.getBlockNumber().catch(() => null);
+    // Cap the chain probe at 3 s so /health stays under Docker's 5 s
+    // healthcheck timeout when the chain RPC is unreachable. Same fix
+    // applied to apps/api in PR #14 — restart loop during chain
+    // outage is exactly what we don't want from the indexer worker.
+    const tip = await Promise.race([
+      chain.getBlockNumber(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+    ]).catch(() => null);
     const synced = await readMeta(db, "last_synced_height");
     const cbSynced = await readMeta(db, "last_synced_coinblast_height");
     const lag = tip !== null ? tip - synced : null;
