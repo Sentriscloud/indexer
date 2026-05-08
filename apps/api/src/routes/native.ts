@@ -325,6 +325,49 @@ export function registerNativeRoutes(
     }
   );
 
+  // ── /contracts/pioneers ───────────────────────────────────
+  // Inverse of /contracts/recent — earliest user-deployed contracts
+  // first. Useful for "first movers" / historical leaderboards
+  // (e.g. who deployed the very first FactoryToken on Sentrix).
+  // rank 1 here = oldest first_seen_block, the actual pioneer.
+  app.get<{ Querystring: { limit?: string } }>(
+    "/contracts/pioneers",
+    async (req) => {
+      const limit = clampLimit(req.query.limit);
+      const rows = await ctx.db.execute<{
+        address: string;
+        first_seen_block: string;
+        last_seen_block: string;
+        code_hash: string | null;
+      }>(
+        sql`
+          SELECT address,
+                 first_seen_block::text,
+                 last_seen_block::text,
+                 code_hash
+          FROM ${addresses}
+          WHERE is_contract = true
+          ORDER BY ${addresses}.first_seen_block ASC
+          LIMIT ${limit}
+        `
+      );
+      return {
+        contracts: (rows as unknown as Array<{
+          address: string;
+          first_seen_block: string;
+          last_seen_block: string;
+          code_hash: string | null;
+        }>).map((r, i) => ({
+          rank: i + 1,
+          address: r.address,
+          first_seen_block: Number(r.first_seen_block),
+          last_seen_block: Number(r.last_seen_block),
+          code_hash: r.code_hash,
+        })),
+      };
+    }
+  );
+
   // ── /whale/tx ─────────────────────────────────────────────
   // Whale transfers: top tx by `value` (native SRX in wei via numeric).
   // Used by scan leaderboard /whale/recent. Default threshold is the
