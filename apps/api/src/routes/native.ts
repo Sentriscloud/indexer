@@ -304,7 +304,7 @@ export function registerNativeRoutes(
                  code_hash
           FROM ${addresses}
           WHERE is_contract = true
-          ORDER BY first_seen_block DESC
+          ORDER BY ${addresses}.first_seen_block DESC
           LIMIT ${limit}
         `
       );
