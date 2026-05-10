@@ -174,7 +174,16 @@ export class SentrixClient {
       cfg.wsUrl ??
       chain.rpcUrls.default.webSocket?.[0];
 
-    this.http = createPublicClient({ chain, transport: http(httpUrl) });
+    // batch:true coalesces concurrent JSON-RPC calls into a single HTTP
+    // request (default window 0 ms = same micro-task). Indexer backfill
+    // fires bursts of getBlock + getLogs + getTransaction per block; with
+    // batching enabled these collapse from N round-trips to 1 per block,
+    // cutting tail latency under load and freeing the public LB to serve
+    // other consumers. wait: 0 keeps single-call latency unchanged.
+    this.http = createPublicClient({
+      chain,
+      transport: http(httpUrl, { batch: { batchSize: 100, wait: 0 } }),
+    });
     this.ws = wsUrl
       ? createPublicClient({ chain, transport: webSocket(wsUrl) })
       : this.http;

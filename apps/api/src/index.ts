@@ -10,6 +10,7 @@ import { registerNativeRoutes } from "./routes/native.js";
 import { registerEtherscanCompat } from "./routes/etherscan.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerCoinblastRoutes } from "./routes/coinblast.js";
+import { registerCacheControl } from "./cache-control.js";
 
 const PORT = Number(process.env.API_PORT ?? 8081);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -45,6 +46,10 @@ async function main() {
 
   const db = createDb(DB_URL);
   const chain = new SentrixClient({ network: NETWORK });
+
+  // Cache-Control hook before routes so any explicit per-route header
+  // wins (the hook checks for an existing value before setting).
+  registerCacheControl(app);
 
   registerHealthRoutes(app, { db, chain, network: NETWORK });
   registerNativeRoutes(app, { db, chain });
