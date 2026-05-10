@@ -80,6 +80,12 @@ export const transactions = pgTable(
     // /whale/tx — ORDER BY value DESC (numeric(78,0) column).
     // Default B-tree handles DESC fine via index scan in reverse.
     valueDescIdx: index("txs_value_desc_idx").on(t.value),
+    // Composite for paginated address history: WHERE from_addr = X
+    // ORDER BY block_height DESC LIMIT N. The single-col `from_idx`
+    // filters but the planner has to sort separately; this composite
+    // serves filter + sort in one index scan. Same logic for to-side.
+    fromBlockIdx: index("txs_from_block_idx").on(t.fromAddr, t.blockHeight),
+    toBlockIdx: index("txs_to_block_idx").on(t.toAddr, t.blockHeight),
   })
 );
 
@@ -131,6 +137,10 @@ export const tokenTransfers = pgTable(
     fromIdx: index("transfers_from_idx").on(t.fromAddr),
     toIdx: index("transfers_to_idx").on(t.toAddr),
     blockIdx: index("transfers_block_idx").on(t.blockHeight),
+    // Composite for paginated /address/:addr/transfers — same shape as
+    // transactions: WHERE from_addr = X ORDER BY block_height DESC.
+    fromBlockIdx: index("transfers_from_block_idx").on(t.fromAddr, t.blockHeight),
+    toBlockIdx: index("transfers_to_block_idx").on(t.toAddr, t.blockHeight),
   })
 );
 
