@@ -253,6 +253,34 @@ async function main() {
     },
   );
 
+  // ── stats_daily_mv refresh ────────────────────────────────────
+  // The materialised view backing /stats/daily must be refreshed for
+  // the API to see new blocks/transactions. CONCURRENTLY refresh
+  // doesn't block readers (requires the unique index on date, present
+  // since migration 0005). 5 min cadence balances freshness vs. PG
+  // load — the API also caches the view-read result for 60 s at the
+  // edge (see apps/api/src/cache-control.ts), so the worst-case
+  // freshness gap a user sees is ~6 min.
+  const STATS_REFRESH_INTERVAL_MS = Number(
+    process.env.INDEXER_STATS_REFRESH_INTERVAL_MS ?? 5 * 60_000,
+  );
+  // Initial seed so the view is non-empty before the first interval fires.
+  // Uses non-CONCURRENT path because the unique index isn't valid until
+  // the first non-concurrent populate completes.
+  try {
+    await db.execute(sql`REFRESH MATERIALIZED VIEW stats_daily_mv`);
+    log.info("stats_daily_mv initial refresh ok");
+  } catch (err) {
+    log.warn({ err: String(err) }, "stats_daily_mv initial refresh failed (view may not exist yet — run migrations)");
+  }
+  const statsRefreshTimer = setInterval(async () => {
+    try {
+      await db.execute(sql`REFRESH MATERIALIZED VIEW CONCURRENTLY stats_daily_mv`);
+    } catch (err) {
+      log.warn({ err: String(err) }, "stats_daily_mv refresh failed");
+    }
+  }, STATS_REFRESH_INTERVAL_MS);
+
   // Graceful shutdown.
   const shutdown = async (sig: string) => {
     log.info({ sig }, "shutting down");
@@ -266,6 +294,7 @@ async function main() {
     } catch {
       /* ignore */
     }
+    clearInterval(statsRefreshTimer);
     await app.close().catch(() => {});
     process.exit(0);
   };

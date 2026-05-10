@@ -39,11 +39,12 @@ class InvalidQueryError extends Error {
 
 // /stats/daily moved off the chain native API in 2026-05-05 — at h~1.55M the
 // on-chain handler scanned every block from genesis under the state read lock
-// and hung the LB. Indexer side: a single GROUP BY against the timestamp-indexed
-// `blocks` table runs in tens of ms over the full history, so the response
-// covers the full chain (no 14-day cap) and we cache for 5 min to absorb burst.
-const STATS_DAILY_TTL_MS = 5 * 60_000;
-let statsDailyCache: { at: number; data: Array<{ date: string; blocks: number; transactions: number }> } | null = null;
+// and hung the LB. Indexer side now reads from `stats_daily_mv` (created in
+// migration 0005), refreshed every 5 min by the indexer worker via
+// `REFRESH MATERIALIZED VIEW CONCURRENTLY`. View is shared across api
+// processes + survives restart, replacing the previous per-process in-memory
+// cache. HTTP edge cache (cache-control.ts) layers a further 60 s response
+// dedupe so a burst of consumers collapses into one PG read.
 
 export function registerNativeRoutes(
   app: FastifyInstance,
@@ -140,32 +141,27 @@ export function registerNativeRoutes(
   });
 
   // ── /stats/daily ──────────────────────────────────────────
-  // All-time daily activity (blocks + tx count). Used by scan analytics
-  // page. Same JSON shape as the chain native handler so scan can swap
-  // upstream without code change.
+  // All-time daily activity (blocks + tx count). Reads the
+  // stats_daily_mv materialised view; the indexer worker REFRESHes
+  // CONCURRENTLY every 5 min so this query is a plain SELECT against
+  // a tiny pre-aggregated table (~1 row per day = ~700 rows for 2 yrs
+  // of chain history). Same JSON shape as before so consumers (scan
+  // analytics page) don't need a code change.
   app.get("/stats/daily", async () => {
-    if (statsDailyCache && Date.now() - statsDailyCache.at < STATS_DAILY_TTL_MS) {
-      return statsDailyCache.data;
-    }
-    const rows = await ctx.db.execute<{ date: string; blocks: string; transactions: string }>(
-      sql`
-        SELECT to_char(to_timestamp(timestamp::bigint), 'YYYY-MM-DD') AS date,
-               count(*)::text AS blocks,
-               COALESCE(sum(tx_count), 0)::text AS transactions
-        FROM ${blocks}
-        GROUP BY 1
-        ORDER BY 1
-      `
+    const rows = await ctx.db.execute<{
+      date: string;
+      blocks: string;
+      transactions: string;
+    }>(
+      sql`SELECT date, blocks::text, transactions::text FROM stats_daily_mv ORDER BY date`,
     );
-    const data = (rows as unknown as Array<{ date: string; blocks: string; transactions: string }>).map(
-      (r) => ({
-        date: r.date,
-        blocks: Number(r.blocks),
-        transactions: Number(r.transactions),
-      })
-    );
-    statsDailyCache = { at: Date.now(), data };
-    return data;
+    return (
+      rows as unknown as Array<{ date: string; blocks: string; transactions: string }>
+    ).map((r) => ({
+      date: r.date,
+      blocks: Number(r.blocks),
+      transactions: Number(r.transactions),
+    }));
   });
 
   // ── /accounts/active ──────────────────────────────────────
