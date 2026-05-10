@@ -11,6 +11,7 @@ import { registerEtherscanCompat } from "./routes/etherscan.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerCoinblastRoutes } from "./routes/coinblast.js";
 import { registerCacheControl } from "./cache-control.js";
+import { registerGraphql } from "./graphql.js";
 
 const PORT = Number(process.env.API_PORT ?? 8081);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -55,6 +56,7 @@ async function main() {
   registerNativeRoutes(app, { db, chain });
   registerEtherscanCompat(app, { db, chain });
   registerCoinblastRoutes(app, { db, chain });
+  await registerGraphql(app, { db });
 
   await app.listen({ host: HOST, port: PORT });
   app.log.info({ port: PORT, network: NETWORK }, "indexer api up");
