@@ -47,8 +47,8 @@ export async function syncOnce(args: SyncOnceArgs): Promise<bigint> {
   if (start > target) return lastSynced;
 
   // Cap each pass to keep memory + transaction size bounded. Operator
-  // can bump via env when running against a wg1 / loopback RPC that
-  // doesn't enforce the public rate limit.
+  // can bump via env when running against an internal RPC endpoint
+  // that doesn't enforce the public rate limit.
   const BATCH = BigInt(process.env.INDEXER_BATCH_SIZE ?? 50);
   const end = start + BATCH > target ? target : start + BATCH - 1n;
 
@@ -70,9 +70,9 @@ interface IndexBlockArgs {
 // Concurrency cap for the per-tx native fetch fan-out. Pure HTTP
 // limit — avoids hammering the chain REST with thousands of concurrent
 // connections on high-tx blocks (chain max is 5000 tx/block). 25 is
-// chosen to keep latency low while staying well under the public LB's
-// per-IP connection cap. Tunable via env when running against a
-// loopback / wg1 RPC with no rate limit.
+// chosen to keep latency low while staying well under the public edge's
+// per-IP connection cap. Tunable via env for deployments that point at
+// an internal RPC endpoint with no rate limit.
 const TX_FETCH_CONCURRENCY = Number(
   process.env.INDEXER_TX_FETCH_CONCURRENCY ?? 25,
 );

@@ -163,9 +163,9 @@ export class SentrixClient {
   constructor(cfg: SentrixClientConfig) {
     const chain = cfg.network === "mainnet" ? SENTRIX_MAINNET : SENTRIX_TESTNET;
     // Operator overrides via env, falling back to caller cfg, falling back
-    // to the public defaults. The wg1 / loopback path is what saves the
-    // backfill from the public RPC's per-IP rate limit — running on the
-    // build host we point at a validator's :8545/rpc directly.
+    // to the public defaults. Pointing the indexer at an internal RPC
+    // endpoint (loopback or private network) is what keeps backfill from
+    // hitting the public edge's per-IP rate limit on long catch-up runs.
     // Multi-URL failover support — operator sets
     // INDEXER_RPC_HTTP_URLS=primary,backup1,backup2 and viem's fallback
     // transport rolls over to the next on connection error / 5xx /
