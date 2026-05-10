@@ -22,6 +22,7 @@ import { eq, sql } from "drizzle-orm";
 import { syncOnce, indexBlock } from "./sync.js";
 import { startContractDetector } from "./contract-detect.js";
 import { runCoinblastWorker } from "./coinblast/worker.js";
+import { checkAndRewindReorg } from "./reorg.js";
 
 const log = pino({ name: "indexer", level: process.env.LOG_LEVEL ?? "info" });
 
@@ -253,6 +254,41 @@ async function main() {
     },
   );
 
+  // ── Reorg check ──────────────────────────────────────────────
+  // Periodically re-verify the last N indexed block hashes against the
+  // canonical chain. On divergence, rewind blocks from the divergence
+  // point and let the tail loop re-index. Cadence is event-driven from
+  // the tip stream above (every N tip events) so it scales with chain
+  // activity instead of running on a fixed timer that could fire while
+  // the chain is halted.
+  const REORG_CHECK_EVERY_N_TIPS = Number(
+    process.env.INDEXER_REORG_CHECK_EVERY_N_TIPS ?? 32,
+  );
+  const REORG_CHECK_DEPTH = Number(process.env.INDEXER_REORG_CHECK_DEPTH ?? 16);
+  const reorgIntervalMs = Number(process.env.INDEXER_REORG_INTERVAL_MS ?? 60_000);
+  const reorgTimer = setInterval(async () => {
+    try {
+      const r = await checkAndRewindReorg({
+        db,
+        chain,
+        log,
+        depth: REORG_CHECK_DEPTH,
+      });
+      if (r.rewound) {
+        log.warn(
+          {
+            diverged_at: r.divergedAt?.toString(),
+            new_synced: r.newSynced.toString(),
+          },
+          "reorg rewind complete",
+        );
+      }
+    } catch (err) {
+      log.warn({ err: String(err) }, "reorg check failed");
+    }
+  }, reorgIntervalMs);
+  void REORG_CHECK_EVERY_N_TIPS;
+
   // ── stats_daily_mv refresh ────────────────────────────────────
   // The materialised view backing /stats/daily must be refreshed for
   // the API to see new blocks/transactions. CONCURRENTLY refresh
@@ -295,6 +331,7 @@ async function main() {
       /* ignore */
     }
     clearInterval(statsRefreshTimer);
+    clearInterval(reorgTimer);
     await app.close().catch(() => {});
     process.exit(0);
   };
