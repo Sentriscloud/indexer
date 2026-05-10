@@ -36,6 +36,13 @@
       "when": 1778443188386,
       "tag": "0004_workable_zeigeist",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1778444800000,
+      "tag": "0005_stats_daily_mv",
+      "breakpoints": true
     }
   ]
 }

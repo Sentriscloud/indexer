@@ -8,6 +8,7 @@
 
 import {
   createPublicClient,
+  fallback,
   defineChain,
   http,
   webSocket,
@@ -162,27 +163,51 @@ export class SentrixClient {
   constructor(cfg: SentrixClientConfig) {
     const chain = cfg.network === "mainnet" ? SENTRIX_MAINNET : SENTRIX_TESTNET;
     // Operator overrides via env, falling back to caller cfg, falling back
-    // to the public defaults. The wg1 / loopback path is what saves the
-    // backfill from the public RPC's per-IP rate limit — running on the
-    // build host we point at a validator's :8545/rpc directly.
-    const httpUrl =
+    // to the public defaults. Pointing the indexer at an internal RPC
+    // endpoint (loopback or private network) is what keeps backfill from
+    // hitting the public edge's per-IP rate limit on long catch-up runs.
+    // Multi-URL failover support — operator sets
+    // INDEXER_RPC_HTTP_URLS=primary,backup1,backup2 and viem's fallback
+    // transport rolls over to the next on connection error / 5xx /
+    // timeout, automatically retrying the failed one with backoff. The
+    // legacy single-URL env (INDEXER_RPC_HTTP_URL) still works as
+    // before — it just becomes the only entry in the URL list.
+    const rawHttpUrls =
+      process.env.INDEXER_RPC_HTTP_URLS ??
       process.env.INDEXER_RPC_HTTP_URL ??
       cfg.httpUrl ??
       chain.rpcUrls.default.http[0];
+    const httpUrls = rawHttpUrls
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const httpUrl = httpUrls[0]!;
     const wsUrl =
       process.env.INDEXER_RPC_WS_URL ??
       cfg.wsUrl ??
       chain.rpcUrls.default.webSocket?.[0];
 
-    // batch:true coalesces concurrent JSON-RPC calls into a single HTTP
-    // request (default window 0 ms = same micro-task). Indexer backfill
-    // fires bursts of getBlock + getLogs + getTransaction per block; with
-    // batching enabled these collapse from N round-trips to 1 per block,
-    // cutting tail latency under load and freeing the public LB to serve
-    // other consumers. wait: 0 keeps single-call latency unchanged.
+    // batch coalesces concurrent JSON-RPC calls into a single HTTP
+    // request (window 0 ms = same micro-task). Indexer backfill fires
+    // bursts of getBlock + getLogs + getTransaction per block; with
+    // batching these collapse from N round-trips to 1 per block.
+    // wait: 0 keeps single-call latency unchanged. Each transport in
+    // the fallback list gets the same batch config.
+    const httpTransports = httpUrls.map((url) =>
+      http(url, { batch: { batchSize: 100, wait: 0 } }),
+    );
     this.http = createPublicClient({
       chain,
-      transport: http(httpUrl, { batch: { batchSize: 100, wait: 0 } }),
+      transport:
+        httpTransports.length === 1
+          ? httpTransports[0]!
+          : fallback(httpTransports, {
+              // Health-check each transport every 60 s; demote bad ones
+              // automatically. retryCount is per-transport — fallback
+              // moves to the next entry once exhausted.
+              rank: { interval: 60_000 },
+              retryCount: 2,
+            }),
     });
     this.ws = wsUrl
       ? createPublicClient({ chain, transport: webSocket(wsUrl) })
