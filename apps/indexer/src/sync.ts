@@ -24,13 +24,7 @@ import {
   transactions as txsTable,
 } from "@sentriscloud/indexer-db";
 import type { SentrixClient } from "@sentriscloud/indexer-chain";
-
-const ERC20_TRANSFER =
-  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-const ERC1155_SINGLE =
-  "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62";
-const ERC1155_BATCH =
-  "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb";
+import { dispatch } from "./handlers/index.js";
 
 interface SyncOnceArgs {
   db: DbClient;
@@ -232,50 +226,16 @@ export async function indexBlock(args: IndexBlockArgs) {
       topic3: lower(l.topics[3]),
       data: l.data,
     });
-    const t0 = l.topics[0];
-    if (t0 === ERC20_TRANSFER && l.topics.length === 3) {
-      transferRows.push({
-        blockHeight: l.blockNumber,
-        txHash: txHashLower,
-        logIndex: l.logIndex,
-        contract: logAddr,
-        standard: "erc20",
-        fromAddr: topicToAddress(l.topics[1]!),
-        toAddr: topicToAddress(l.topics[2]!),
-        tokenId: null,
-        amount: BigInt(l.data || "0x0").toString(),
-      });
-    } else if (t0 === ERC20_TRANSFER && l.topics.length === 4) {
-      transferRows.push({
-        blockHeight: l.blockNumber,
-        txHash: txHashLower,
-        logIndex: l.logIndex,
-        contract: logAddr,
-        standard: "erc721",
-        fromAddr: topicToAddress(l.topics[1]!),
-        toAddr: topicToAddress(l.topics[2]!),
-        tokenId: BigInt(l.topics[3]!).toString(),
-        amount: "1",
-      });
-    } else if (t0 === ERC1155_SINGLE) {
-      const data = l.data.replace(/^0x/, "");
-      const id = BigInt("0x" + data.slice(0, 64));
-      const value = BigInt("0x" + data.slice(64, 128));
-      transferRows.push({
-        blockHeight: l.blockNumber,
-        txHash: txHashLower,
-        logIndex: l.logIndex,
-        contract: logAddr,
-        standard: "erc1155",
-        fromAddr: topicToAddress(l.topics[2]!),
-        toAddr: topicToAddress(l.topics[3]!),
-        tokenId: id.toString(),
-        amount: value.toString(),
-      });
-    } else if (t0 === ERC1155_BATCH) {
-      // Two dynamic arrays — defer batch decode. Raw log still inserted
-      // so the materialiser can re-decode at its own pace.
-    }
+    // Hand the log to the registry; whichever handler owns this topic0
+    // returns a TransferRow (or null to skip — eg ERC-1155 batch
+    // currently null-returns since the per-transfer rows can't be
+    // flattened into one schema row without growing tokenTransfers).
+    const transferRow = dispatch({
+      log: l,
+      contract: logAddr,
+      txHash: txHashLower,
+    });
+    if (transferRow) transferRows.push(transferRow);
   }
 
   // ── PHASE 4: single SQL transaction with all batch INSERTs. The
@@ -353,7 +313,3 @@ async function readLastSynced(db: DbClient): Promise<bigint> {
   return BigInt(rows[0].value);
 }
 
-function topicToAddress(topic: string): string {
-  // Topics are 32-byte right-padded; addresses are the right-most 20 bytes.
-  return "0x" + topic.slice(-40).toLowerCase();
-}
