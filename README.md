@@ -10,7 +10,7 @@ and log from the public RPC + WebSocket endpoints, decodes ERC-20/721/1155 trans
 tracks reorgs, and exposes the result as an Etherscan-API-compatible REST surface
 plus Sentrix-native endpoints (validators, epochs, native token ops).
 
-> **Status:** scaffold — Phase 1 in progress. Tier 1 of the Sentrix Builder Readiness Sprint.
+> **Status:** Live in production — backs the public REST + scan UI on both mainnet (chain 7119) and testnet (chain 7120). A Rust rewrite is in active development at [`Sentriscloud/indexer-rs`](https://github.com/Sentriscloud/indexer-rs); this TS implementation continues to serve until that one reaches dual-run parity + cutover.
 
 ## Architecture
 
