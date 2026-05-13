@@ -82,7 +82,7 @@ echo "==> typecheck"
 echo "✓ typecheck clean"
 
 # Files to ship. Keep this list explicit + reviewed; avoid blanket `scp -r`
-# that would push founder-private artifacts or local node_modules.
+# that would push internal artifacts or local node_modules.
 FILES=(
   apps/api/package.json
   apps/api/src/index.ts
