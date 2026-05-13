@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Sync source + rebuild + recreate the mainnet indexer stack on vps6.
+# Sync source + rebuild + recreate the mainnet indexer stack on the mainnet host.
 #
-# vps6's ~/indexer-deploy is NOT a git checkout (operator preference; keeps
-# the prod host out of the GitHub auth path). Source files are pushed via
-# scp instead of `git pull`. This script captures the dance so we don't
-# have to re-derive the file list on every PR.
+# The mainnet host's ~/indexer-deploy is NOT a git checkout (operator
+# preference; keeps the prod host out of the GitHub auth path). Source
+# files are pushed via scp instead of `git pull`. This script captures
+# the dance so we don't have to re-derive the file list on every PR.
 #
 # Usage:
 #   ./scripts/deploy-mainnet.sh                      # full sync + rebuild
@@ -12,7 +12,7 @@
 #   ./scripts/deploy-mainnet.sh --skip-build         # scp only, no rebuild
 #
 # Env:
-#   MAINNET_HOST  ssh alias for the mainnet host (default: vps6)
+#   MAINNET_HOST  ssh alias for the mainnet host (required)
 #
 # Pre-flight:
 #   - Refuses if local working tree is dirty
@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-HOST="${MAINNET_HOST:-vps6}"
+HOST="${MAINNET_HOST:?MAINNET_HOST must be set (ssh alias for the mainnet host)}"
 SKIP_BUILD=0
 CHECK_ONLY=0
 
