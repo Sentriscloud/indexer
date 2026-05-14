@@ -14,9 +14,9 @@ services:
     container_name: sentrix-indexer-testnet-pg
     restart: unless-stopped
     environment:
-      POSTGRES_USER: indexer
-      POSTGRES_PASSWORD: indexer
-      POSTGRES_DB: sentrix_indexer_testnet
+      POSTGRES_USER: ${POSTGRES_USER:?env required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?env required}
+      POSTGRES_DB: ${POSTGRES_DB:?env required}
     ports:
       - "127.0.0.1:5433:5432"
     volumes:
@@ -38,7 +38,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      INDEXER_DATABASE_URL: postgres://indexer:indexer@postgres:5432/sentrix_indexer_testnet
+      INDEXER_DATABASE_URL: ${INDEXER_DATABASE_URL:?env required}
       INDEXER_NETWORK: testnet
       INDEXER_HEALTH_PORT: 8084
       LOG_LEVEL: info
@@ -71,7 +71,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      INDEXER_DATABASE_URL: postgres://indexer:indexer@postgres:5432/sentrix_indexer_testnet
+      INDEXER_DATABASE_URL: ${INDEXER_DATABASE_URL:?env required}
       INDEXER_NETWORK: testnet
       API_PORT: 8083
       LOG_LEVEL: info
