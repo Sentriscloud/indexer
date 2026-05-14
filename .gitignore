@@ -32,3 +32,4 @@ coverage
 # postgres data (local dev)
 .docker/postgres
 .docker/redis
+.env.production
